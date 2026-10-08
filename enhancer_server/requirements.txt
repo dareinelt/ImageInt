@@ -1,0 +1,32 @@
+# Runtime dependencies of the ImageInt prompt-enhancer server.
+#
+# The enhancer is a 9B Qwen3.5-VL derivative, so this file is close to the image
+# server's: the same torch, the same transformers, no diffusers (there is
+# nothing to denoise here) and no vLLM.
+#
+# vLLM is deliberately absent. Its CPU backend cannot initialise this
+# checkpoint -- Qwen3.5-VL ships a nested text config without an explicit
+# ``architectures`` entry, which the CPU backend rejects during engine startup,
+# and vLLM then falls back to an architecture it cannot serve. transformers
+# loads the checkpoint's own modelling code through ``trust_remote_code``
+# instead, which is why it is the CPU answer here.
+#
+# torch is pinned by the *lower* bound the Qwen-Image-2.1 model card documents.
+# The Dockerfile installs torch first from the CPU wheel index; pip then sees
+# this constraint as already satisfied.
+torch>=2.4.0
+transformers>=5.17
+accelerate>=1.0.0
+safetensors>=0.4.5
+sentencepiece>=0.2.0
+
+# The checkpoint's processor reaches for Pillow while it is being constructed,
+# even though this server only ever sends it text.
+pillow>=10.4.0
+
+# int8/int4 weight quantisation for hosts that cannot hold bf16 in RAM.
+optimum-quanto>=0.2.7
+
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4

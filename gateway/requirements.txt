@@ -1,0 +1,13 @@
+# Runtime dependencies of the ImageInt gateway.
+#
+# Deliberately small: the gateway only proxies between LLMInt and the two vLLM
+# servers. Nothing here pulls in torch -- the models live in their own images.
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+httpx==0.28.1
+
+# Repairs answers of the prompt enhancer that are *nearly* valid JSON (a trailing
+# comma, an unescaped quote). The balanced-brace scan in app/enhancer.py handles
+# every well-formed answer without it, but on a CPU host a retry costs minutes,
+# so salvaging a broken answer is worth one small pure-Python dependency.
+json-repair==0.35.0

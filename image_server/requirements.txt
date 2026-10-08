@@ -1,0 +1,25 @@
+# Runtime dependencies of the ImageInt image server.
+#
+# The image server owns the model, so this is the heavyweight requirements file
+# of the project. Everything here is CPU-capable; no CUDA wheels are pulled in
+# by default, which keeps the image small and portable.
+#
+# torch is pinned by the *lower* bound the Qwen-Image-2.1 model card documents.
+# The Dockerfile installs torch first from the CPU wheel index; pip then sees
+# this constraint as already satisfied.
+torch>=2.4.0
+transformers>=5.17
+diffusers>=0.41.0
+accelerate>=1.0.0
+safetensors>=0.4.5
+sentencepiece>=0.2.0
+
+# Pillow both encodes the PNG the API returns and drives the stub engine.
+pillow>=10.4.0
+
+# int8/int4 weight quantisation for hosts that cannot hold bf16 in RAM.
+optimum-quanto>=0.2.7
+
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4

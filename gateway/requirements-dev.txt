@@ -1,0 +1,10 @@
+# Test dependencies of the ImageInt gateway.
+#
+# Installed on top of requirements.txt:
+#     pip install -r requirements.txt -r requirements-dev.txt
+pytest==8.3.4
+pytest-asyncio==0.25.2
+
+# Only used by the tests, to verify that a stored image really is a PNG of the
+# expected size. The gateway itself never decodes an image.
+pillow==11.1.0

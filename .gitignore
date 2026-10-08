@@ -1,0 +1,28 @@
+# ── Runtime ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+*.log
+.pytest_cache/
+
+# ── Local model/image scratch data ───────────────────────────────────────────
+models/
+data/
+images/
+*.png
+*.jpg
+*.jpeg
+*.webp
+# Documentation screenshots are tracked, so re-include them.
+!docs/screenshots/**
+!gateway/app/prompts/*.txt
+
+# ── Editor / OS ──────────────────────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+
+# ── Tool scratch ─────────────────────────────────────────────────────────────
+.playwright-mcp/
