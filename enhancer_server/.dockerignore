@@ -1,0 +1,14 @@
+# Build context hygiene for the enhancer server.
+#
+# The model weights are downloaded at runtime into /models, never copied in, so
+# the context stays a few hundred kilobytes.
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+tests/
+pytest.ini
+Dockerfile
+.dockerignore

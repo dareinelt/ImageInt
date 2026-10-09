@@ -1,0 +1,312 @@
+# ImageInt – Qwen-Image-2.1 on CPU behind one HTTP API.
+#
+# Three containers:
+#   gateway   FastAPI app that owns the public API (only published port)
+#   enhancer  enhancer_server: Qwen-Image-2.1-PE-T2I through transformers, the
+#             documented prompt enhancer of Qwen-Image-2.1 (internal only)
+#   image     image_server: Qwen-Image-2.1 through diffusers + transformers
+#             (internal only)
+#
+# The gateway is the only service that needs to be reachable from the LLMInt
+# host; enhancer and image stay on the internal network.
+#
+# Start:   docker compose up -d
+# Logs:    docker compose logs -f gateway
+# CUDA:    docker compose -f docker-compose.yml -f docker-compose.cuda.yml up -d
+#
+# All values can be set in .env (see .env.example).
+#
+# ── Why diffusers and transformers, and not vLLM ──────────────────────────────
+# Qwen-Image-2.1 is a diffusers checkpoint (``QwenImage21Pipeline``) and the
+# vLLM flavour that serves it, vLLM-Omni, publishes GPU-only images. CPU-only is
+# a hard requirement here, so the image model is served by the image_server
+# package instead: diffusers + transformers + torch, no CUDA libraries in the
+# reference build.
+#
+# The prompt enhancer is a plain text model, but the official CPU build of vLLM
+# cannot initialise it either: Qwen-Image-2.1-PE-T2I is a Qwen3.5-VL 9B whose
+# nested text config carries no explicit ``architectures`` entry, which the CPU
+# backend rejects while starting the engine. enhancer_server/ therefore loads the
+# same checkpoint through transformers, which honours the checkpoint's own
+# remote code. Both model containers are consequently built from this repository
+# and share one stack, one dtype policy and one health contract.
+#
+# ── Sizing ────────────────────────────────────────────────────────────────────
+# This stack is dimensioned for:
+#
+#     >= 8 CPU cores with AVX2 (x86-64) and >= 32 GB RAM
+#
+# and that is exactly what the gateway checks at startup (see GET /v1/config,
+# field "host"). The memory budget of the two model containers is:
+#
+#     enhancer  Qwen-Image-2.1-PE-T2I      ~19 GB weights (bf16, 9B) + ~2 GB KV
+#     image     Qwen-Image-2.1 bf16        ~33 GB (text encoder 17.5 GB,
+#                                           DiT 14 GB, VAE 1.35 GB) + activations
+#     gateway   proxies HTTP only          ~0.4 GB
+#     ---------------------------------------------------------------------
+#     both models resident                 ~57 GB
+#
+# bf16 is what the model card documents and therefore the default, but it does
+# not fit a 32 GB host together with the enhancer -- and not even on its own.
+# The two documented profiles are:
+#
+#     >= 64 GB host:  docker compose up -d
+#                     both models resident in bf16
+#
+#     >= 32 GB host:  IMAGEINT_IMAGE_QUANT=int8 docker compose up -d
+#                     int8 halves the image pipeline to ~17 GB. Combine with
+#                     IMAGEINT_PE_ENABLED=false to drop the enhancer as well:
+#                     prompts are then used verbatim (see README "CPU-Modus").
+#
+# An endpoint below the reference still runs – it is only slower – and the
+# gateway logs the deviation at startup.
+
+services:
+  # ── API gateway ─────────────────────────────────────────────────────────────
+  # Wraps both model servers behind /v1/*. Stateless: the enhancer prompt, the
+  # sampling settings and the model ids live here as configuration, so an
+  # administrator keeps configuring everything in LLMInt.
+  gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    image: imageint-gateway:${IMAGEINT_IMAGE_TAG:-local}
+    restart: unless-stopped
+    # The gateway only orchestrates HTTP calls, so it needs little memory.
+    mem_limit: ${IMAGEINT_MEM_LIMIT:-512m}
+    ports:
+      # The published port is what LLMInt talks to. Change the left side only.
+      - "${IMAGEINT_PORT:-8080}:8080"
+    environment:
+      # Shared secret clients must send as X-Auth-Token / Authorization: Bearer.
+      # Empty disables authentication – only acceptable in a trusted network.
+      IMAGEINT_TOKEN: ${IMAGEINT_TOKEN:-}
+      # Absolute base URL the gateway advertises in status_url / image_url.
+      # Leave empty when LLMInt reaches the gateway through the same host:port.
+      IMAGEINT_PUBLIC_URL: ${IMAGEINT_PUBLIC_URL:-}
+      IMAGEINT_LOG_LEVEL: ${IMAGEINT_LOG_LEVEL:-INFO}
+      # Hardware check mode: auto / strict / off. See .env.example.
+      IMAGEINT_HOST_CHECK: ${IMAGEINT_HOST_CHECK:-auto}
+      IMAGEINT_MAX_PROMPT_CHARS: ${IMAGEINT_MAX_PROMPT_CHARS:-4000}
+      # How long a request may be answered synchronously. A CPU render of a
+      # 2K image takes minutes, so this is short on purpose: longer jobs answer
+      # 202 with a job id and are polled instead.
+      IMAGEINT_SYNC_TIMEOUT: ${IMAGEINT_SYNC_TIMEOUT:-120}
+      # One render at a time; further requests queue up to IMAGEINT_MAX_QUEUED_JOBS
+      # and are rejected with 503 busy beyond that.
+      IMAGEINT_MAX_CONCURRENT_JOBS: ${IMAGEINT_MAX_CONCURRENT_JOBS:-1}
+      IMAGEINT_MAX_QUEUED_JOBS: ${IMAGEINT_MAX_QUEUED_JOBS:-2}
+      IMAGEINT_MAX_JOBS: ${IMAGEINT_MAX_JOBS:-200}
+      IMAGEINT_JOB_RETENTION_SECONDS: ${IMAGEINT_JOB_RETENTION_SECONDS:-86400}
+      IMAGEINT_STORAGE_DIR: /data/images
+      # Loading contract: how long a probe is cached, how many seconds a 503
+      # tells the client to wait, and how long a never-reachable model server
+      # counts as "still starting" instead of "broken".
+      IMAGEINT_HEALTH_CACHE_SECONDS: ${IMAGEINT_HEALTH_CACHE_SECONDS:-5}
+      IMAGEINT_LOADING_RETRY_AFTER: ${IMAGEINT_LOADING_RETRY_AFTER:-15}
+      IMAGEINT_STARTING_GRACE_SECONDS: ${IMAGEINT_STARTING_GRACE_SECONDS:-1800}
+      # ── Prompt enhancer (Qwen-Image-2.1-PE-T2I) ────────────────────────────
+      IMAGEINT_PE_URL: http://enhancer:8000
+      # The repository id, because it is also what the enhancer container loads.
+      IMAGEINT_PE_MODEL: ${IMAGEINT_PE_MODEL:-Qwen/Qwen-Image-2.1-PE-T2I}
+      IMAGEINT_PE_TOKEN: ${IMAGEINT_PE_TOKEN:-}
+      IMAGEINT_PE_TIMEOUT: ${IMAGEINT_PE_TIMEOUT:-900}
+      # false renders the user prompt verbatim: the mode for a host that cannot
+      # keep the 19 GB enhancer and the image pipeline resident at once.
+      IMAGEINT_PE_ENABLED: ${IMAGEINT_PE_ENABLED:-true}
+      # Production sampling of the t2i enhancer. A wrong presence penalty does
+      # not fail, it quietly changes the distribution – do not tune blindly.
+      IMAGEINT_PE_TEMPERATURE: ${IMAGEINT_PE_TEMPERATURE:-1.0}
+      IMAGEINT_PE_TOP_P: ${IMAGEINT_PE_TOP_P:-0.95}
+      IMAGEINT_PE_TOP_K: ${IMAGEINT_PE_TOP_K:-20}
+      IMAGEINT_PE_MIN_P: ${IMAGEINT_PE_MIN_P:-0.0}
+      IMAGEINT_PE_PRESENCE_PENALTY: ${IMAGEINT_PE_PRESENCE_PENALTY:-1.5}
+      IMAGEINT_PE_MAX_NEW_TOKENS: ${IMAGEINT_PE_MAX_NEW_TOKENS:-16256}
+      IMAGEINT_PE_SEED: ${IMAGEINT_PE_SEED:-42}
+      # ── Image model (Qwen-Image-2.1 via the image server) ──────────────────
+      IMAGEINT_IMAGE_URL: http://image:8000
+      IMAGEINT_IMAGE_MODEL: ${IMAGEINT_IMAGE_MODEL:-Qwen/Qwen-Image-2.1}
+      # Reported in GET /v1/config only; the weight format is set on the image
+      # container through the same variable. bf16 is the default there.
+      IMAGEINT_IMAGE_QUANT: ${IMAGEINT_IMAGE_QUANT:-none}
+      IMAGEINT_IMAGE_TOKEN: ${IMAGEINT_IMAGE_TOKEN:-}
+      IMAGEINT_IMAGE_TIMEOUT: ${IMAGEINT_IMAGE_TIMEOUT:-1800}
+      # The image server implements the OpenAI Images API on
+      # /v1/images/generations. "chat" is a compatibility fallback for a
+      # deployment that fronts a chat-completions image model instead.
+      IMAGEINT_IMAGE_ROUTE: ${IMAGEINT_IMAGE_ROUTE:-images}
+      IMAGEINT_IMAGE_STEPS: ${IMAGEINT_IMAGE_STEPS:-40}
+      # Qwen-Image-2.1 is meant to be sampled without guidance, hence 1.0.
+      # Raising this makes a negative prompt effective again.
+      IMAGEINT_IMAGE_TRUE_CFG_SCALE: ${IMAGEINT_IMAGE_TRUE_CFG_SCALE:-1.0}
+      IMAGEINT_IMAGE_NEGATIVE_PROMPT: ${IMAGEINT_IMAGE_NEGATIVE_PROMPT:-}
+      # Largest canvas the gateway accepts. The default is the largest of the
+      # seven documented ratios (2400x1792); 16:9 (2752x1536) fits under it.
+      IMAGEINT_IMAGE_MAX_PIXELS: ${IMAGEINT_IMAGE_MAX_PIXELS:-4300800}
+      TZ: ${TZ:-Europe/Berlin}
+    volumes:
+      # Generated images. Persisted so a job id stays resolvable across a
+      # gateway restart, which is what the notification mail links to.
+      - imageint_data:/data
+    depends_on:
+      enhancer:
+        condition: service_started
+      image:
+        condition: service_started
+
+  # ── Prompt enhancer (Qwen-Image-2.1-PE-T2I) ─────────────────────────────────
+  # The enhancer documented in the Qwen-Image-2.1 model card: a fine-tuned
+  # Qwen3.5-VL 9B that rewrites a short user prompt into the long, structured
+  # prompt the image model was trained on, and that also picks the aspect
+  # ratio ("wh_ratio"). Its system prompt is part of the checkpoint and is
+  # vendored verbatim in gateway/app/prompts/.
+  #
+  # Served by enhancer_server/ -- transformers + torch on the CPU, the same
+  # stack as the image model. It is deliberately *not* vLLM: the CPU backend of
+  # vLLM cannot initialise this checkpoint, see enhancer_server/Dockerfile. The
+  # container speaks the OpenAI chat-completions API over SSE, so the gateway
+  # cannot tell the difference and needed no change.
+  #
+  # Internal only: no host port is published.
+  enhancer:
+    build:
+      context: ./enhancer_server
+      dockerfile: Dockerfile
+      target: ${IMAGEINT_PE_BUILD_TARGET:-cpu}
+    image: imageint-enhancer:${IMAGEINT_PE_TAG:-local}
+    platform: ${IMAGEINT_PE_PLATFORM:-linux/amd64}
+    restart: unless-stopped
+    # 18.8 GB of bf16 weights plus the KV cache of a 32k context. With
+    # IMAGEINT_PE_QUANT=int8 roughly 10 GB are enough; int4 needs a quarter.
+    mem_limit: ${IMAGEINT_PE_MEM_LIMIT:-24g}
+    mem_reservation: ${IMAGEINT_PE_MEM_RESERVATION:-20g}
+    shm_size: ${IMAGEINT_PE_SHM:-2g}
+    environment:
+      IMAGEINT_PE_MODEL: ${IMAGEINT_PE_MODEL:-Qwen/Qwen-Image-2.1-PE-T2I}
+      IMAGEINT_PE_REVISION: ${IMAGEINT_PE_REVISION:-}
+      # bf16 is the documented format. float32 doubles the footprint and is only
+      # for a CPU without bf16 support.
+      IMAGEINT_PE_DTYPE: ${IMAGEINT_PE_DTYPE:-bfloat16}
+      # cpu is the requirement; cuda is the prepared NVIDIA path (see
+      # docker-compose.cuda.yml).
+      IMAGEINT_PE_DEVICE: ${IMAGEINT_PE_DEVICE:-cpu}
+      # none (bf16) | int8 | int4, applied through optimum-quanto.
+      IMAGEINT_PE_QUANT: ${IMAGEINT_PE_QUANT:-none}
+      IMAGEINT_PE_ENGINE: ${IMAGEINT_PE_ENGINE:-transformers}
+      # The gateway sends the same value as X-Auth-Token and as a bearer token.
+      IMAGEINT_PE_TOKEN: ${IMAGEINT_PE_TOKEN:-}
+      IMAGEINT_PE_PORT: "8000"
+      # Load the weights at startup. Set to false on a 32 GB host that also
+      # runs the image pipeline; the gateway then asks the server to start
+      # loading through POST /v1/warmup instead of waiting forever.
+      IMAGEINT_PE_PRELOAD: ${IMAGEINT_PE_PRELOAD:-true}
+      # 0 leaves torch's default, which is one thread per core -- the right
+      # value on the 8-core reference machine.
+      IMAGEINT_PE_CPU_THREADS: ${IMAGEINT_PE_CPU_THREADS:-0}
+      # The enhancer thinks before it answers. Turning this off saves a lot of
+      # CPU time at the cost of prompt quality.
+      IMAGEINT_PE_ENABLE_THINKING: ${IMAGEINT_PE_ENABLE_THINKING:-true}
+      # The enhancer emits a long structured prompt; 32k covers prompt plus
+      # answer. Raising this costs KV cache memory.
+      IMAGEINT_PE_CONTEXT: ${IMAGEINT_PE_CONTEXT:-32768}
+      # Artificial delay of the stub engine, in seconds. Only meaningful with
+      # IMAGEINT_PE_ENGINE=stub.
+      IMAGEINT_PE_STUB_DELAY: ${IMAGEINT_PE_STUB_DELAY:-0}
+      IMAGEINT_PE_LOG_LEVEL: ${IMAGEINT_PE_LOG_LEVEL:-INFO}
+      HF_HOME: /models/hf
+      TZ: ${TZ:-Europe/Berlin}
+    volumes:
+      # Shared with the image container so the Hugging Face blobs are fetched
+      # once. The enhancer pulls ~19 GB on first start.
+      - hf_cache:/models/hf
+    healthcheck:
+      # 200 = ready, 503 = still loading. Both mean the process is alive, which
+      # is all a Docker health check should decide here.
+      #
+      # http.client is used instead of urllib.request on purpose: urlopen raises
+      # HTTPError on any non-2xx status, so it can never observe the 503 of the
+      # loading window and would report the container unhealthy for minutes.
+      test: ["CMD", "python", "-c", "import http.client,sys; c=http.client.HTTPConnection('127.0.0.1',8000,timeout=8); c.request('GET','/health'); sys.exit(0 if c.getresponse().status in (200,503) else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      # First start downloads ~19 GB and then loads a 9B model on the CPU.
+      start_period: 1800s
+
+  # ── Image model (Qwen-Image-2.1 via diffusers) ─────────────────────────────
+  # Renders the enhanced prompt into an image. Served by image_server/, which
+  # runs QwenImage21Pipeline from diffusers with the text encoder and tokenizer
+  # from transformers, entirely on the CPU.
+  #
+  # The container speaks the OpenAI Images API, so replacing the earlier
+  # vLLM-Omni container required no change on the gateway side.
+  # docker-compose.cuda.yml switches the build target to the CUDA variant.
+  image:
+    build:
+      context: ./image_server
+      dockerfile: Dockerfile
+      target: ${IMAGEINT_IMAGE_BUILD_TARGET:-cpu}
+    image: imageint-image:${IMAGEINT_IMAGE_TAG:-local}
+    platform: ${IMAGEINT_IMAGE_PLATFORM:-linux/amd64}
+    restart: unless-stopped
+    # bf16: text encoder (17.5 GB) + DiT (14 GB) + VAE (1.35 GB) + activations
+    # for a 2400x1792 canvas. With IMAGEINT_IMAGE_QUANT=int8 roughly half of
+    # that is enough; int4 needs a quarter. See the sizing block at the top.
+    mem_limit: ${IMAGEINT_MODEL_MEM_LIMIT:-40g}
+    mem_reservation: ${IMAGEINT_MODEL_MEM_RESERVATION:-34g}
+    shm_size: ${IMAGEINT_MODEL_SHM:-2g}
+    environment:
+      IMAGEINT_IMAGE_MODEL: ${IMAGEINT_IMAGE_MODEL:-Qwen/Qwen-Image-2.1}
+      IMAGEINT_IMAGE_REVISION: ${IMAGEINT_IMAGE_REVISION:-}
+      # bf16 is the documented format. float32 doubles the footprint and is only
+      # for a CPU without bf16 support.
+      IMAGEINT_IMAGE_DTYPE: ${IMAGEINT_IMAGE_DTYPE:-bfloat16}
+      # cpu is the requirement; cuda is the prepared NVIDIA path (see
+      # docker-compose.cuda.yml); mps exists for a native Apple Silicon run.
+      IMAGEINT_IMAGE_DEVICE: ${IMAGEINT_IMAGE_DEVICE:-cpu}
+      # none (bf16) | int8 | int4, applied through optimum-quanto. int8 is the
+      # documented setting for a 32 GB host.
+      IMAGEINT_IMAGE_QUANT: ${IMAGEINT_IMAGE_QUANT:-none}
+      IMAGEINT_IMAGE_ENGINE: ${IMAGEINT_IMAGE_ENGINE:-diffusers}
+      IMAGEINT_IMAGE_TOKEN: ${IMAGEINT_IMAGE_TOKEN:-}
+      IMAGEINT_IMAGE_PORT: "8000"
+      # Load the weights at startup. This is what makes the gateway's loading
+      # contract meaningful: /health answers 503 for the minutes it takes, and
+      # no request ever has to wait on a cold cache.
+      IMAGEINT_IMAGE_PRELOAD: ${IMAGEINT_IMAGE_PRELOAD:-true}
+      # 0 leaves torch's default, which is one thread per core -- the right
+      # value on the 8-core reference machine.
+      IMAGEINT_IMAGE_CPU_THREADS: ${IMAGEINT_IMAGE_CPU_THREADS:-0}
+      IMAGEINT_IMAGE_STEPS: ${IMAGEINT_IMAGE_STEPS:-40}
+      IMAGEINT_IMAGE_TRUE_CFG_SCALE: ${IMAGEINT_IMAGE_TRUE_CFG_SCALE:-1.0}
+      IMAGEINT_IMAGE_NEGATIVE_PROMPT: ${IMAGEINT_IMAGE_NEGATIVE_PROMPT:-}
+      IMAGEINT_IMAGE_MAX_PIXELS: ${IMAGEINT_IMAGE_MAX_PIXELS:-4300800}
+      # Prefix KV cache of the DiT. Saves a lot of work on a CPU host.
+      IMAGEINT_IMAGE_KV_CACHE: ${IMAGEINT_IMAGE_KV_CACHE:-true}
+      # Artificial delay of the stub engine, in seconds. Only meaningful with
+      # IMAGEINT_IMAGE_ENGINE=stub.
+      IMAGEINT_IMAGE_STUB_DELAY: ${IMAGEINT_IMAGE_STUB_DELAY:-0}
+      IMAGEINT_IMAGE_LOG_LEVEL: ${IMAGEINT_IMAGE_LOG_LEVEL:-INFO}
+      HF_HOME: /models/hf
+      TZ: ${TZ:-Europe/Berlin}
+    volumes:
+      # Shared with the enhancer, so the shared text encoder and tokenizer are
+      # downloaded once. The image container pulls ~33 GB on first start.
+      - hf_cache:/models/hf
+    healthcheck:
+      # 200 = ready, 503 = still loading. Both mean the process is alive, which
+      # is all a Docker health check should decide here.
+      #
+      # http.client is used instead of urllib.request on purpose: urlopen raises
+      # HTTPError on any non-2xx status, so it can never observe the 503 of the
+      # loading window and would report the container unhealthy for minutes.
+      test: ["CMD", "python3", "-c", "import http.client,sys; c=http.client.HTTPConnection('127.0.0.1',8000,timeout=8); c.request('GET','/health'); sys.exit(0 if c.getresponse().status in (200,503) else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      # First start downloads ~33 GB and then warms up a CPU pipeline.
+      start_period: 3600s
+
+volumes:
+  imageint_data:
+  hf_cache:

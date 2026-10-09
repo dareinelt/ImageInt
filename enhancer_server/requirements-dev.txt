@@ -1,0 +1,12 @@
+# Test dependencies of the ImageInt prompt-enhancer server.
+#
+# Installed on top of requirements.txt:
+#     pip install -r requirements.txt -r requirements-dev.txt
+#
+# The suite is written so it passes without torch or the model weights: it
+# exercises configuration, the engine state machine, the SSE wire format and
+# the real gateway payload builder against the stub engine. Only the optional
+# ``model`` marker needs a real download.
+pytest==8.3.4
+pytest-asyncio==0.25.2
+httpx==0.28.1

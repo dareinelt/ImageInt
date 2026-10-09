@@ -1,0 +1,100 @@
+# Override for hosts with an NVIDIA GPU (CUDA).
+#
+# The base file runs the whole stack on CPU. This override hands the GPUs to the
+# containers and switches both model services to the CUDA build target. It is a
+# *preparation*: the CPU path is the supported one and the only path that has
+# been verified, so treat the GPU variant as a starting point and not as a
+# tested configuration.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.cuda.yml up -d
+#
+# Requirements on the host:
+#   - NVIDIA driver and the NVIDIA Container Toolkit
+#     (https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+#   - verify with: docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi
+#
+# Sizing: the memory ceilings drop to a few gigabytes each, because the weights
+# live in VRAM now. The *system* RAM requirement of the gateway (32 GB) stays as
+# documented; a CUDA host with less RAM only has to hold the host page cache.
+# Rough VRAM budget:
+#
+#   enhancer  Qwen-Image-2.1-PE-T2I bf16   ~19 GB + KV cache   -> 24 GB card
+#   image     Qwen-Image-2.1 bf16          ~33 GB + activations -> 40 GB card
+#
+# The image pipeline is the bigger of the two because diffusers keeps the text
+# encoder, the DiT and the VAE resident. Both models at once therefore want
+# ~60 GB of VRAM. On a single 24 GB card run one of them at a time (see README
+# "CUDA"), or keep the enhancer on CPU and only the image model on the GPU --
+# mixing is allowed, because the two services are independent.
+#
+# The AVX2 part of the hardware requirement does not apply on a CUDA host; the
+# gateway reports it as "entfällt" in GET /v1/config.
+
+services:
+  # ── Prompt enhancer on the GPU ──────────────────────────────────────────────
+  # The same enhancer server, built with CUDA wheels instead of the CPU ones and
+  # placed on the GPU through IMAGEINT_PE_DEVICE. The OpenAI chat-completions
+  # contract is unchanged.
+  enhancer:
+    build:
+      context: ./enhancer_server
+      dockerfile: Dockerfile
+      target: cuda
+    image: imageint-enhancer-cuda:${IMAGEINT_PE_TAG:-local}
+    # Undo the linux/amd64 pin of the base file: the CUDA wheels are published
+    # for the host architecture.
+    platform: !reset null
+    # The base file's mem_limit/mem_reservation are dropped here: a service that
+    # reserves GPUs declares its memory under deploy.resources instead, and
+    # Compose rejects a project that uses both forms.
+    mem_limit: !reset null
+    mem_reservation: !reset null
+    environment:
+      IMAGEINT_PE_DEVICE: cuda
+      # bfloat16 is native on Ampere and newer; on older cards the enhancer
+      # still works, but keep an eye on the "bfloat16 is not supported" warning.
+      IMAGEINT_PE_DTYPE: ${IMAGEINT_PE_DTYPE:-bfloat16}
+      # VRAM is not the constraint any more, so the quantisation stays off.
+      IMAGEINT_PE_QUANT: ${IMAGEINT_PE_QUANT:-none}
+    deploy:
+      resources:
+        limits:
+          memory: ${IMAGEINT_PE_MEM_LIMIT_CUDA:-16g}
+        reservations:
+          memory: ${IMAGEINT_PE_MEM_RESERVATION_CUDA:-8g}
+          devices:
+            - driver: nvidia
+              count: ${IMAGEINT_GPU_COUNT:-all}
+              capabilities: [gpu]
+
+  # ── Image model on the GPU ──────────────────────────────────────────────────
+  # Same image server code, built with CUDA wheels instead of the CPU ones, and
+  # placed on the GPU through IMAGEINT_IMAGE_DEVICE. Nothing else changes: the
+  # container speaks the same OpenAI Images API as in CPU mode.
+  image:
+    build:
+      context: ./image_server
+      dockerfile: Dockerfile
+      target: cuda
+    image: imageint-image-cuda:${IMAGEINT_IMAGE_TAG:-local}
+    platform: !reset null
+    mem_limit: !reset null
+    mem_reservation: !reset null
+    environment:
+      IMAGEINT_IMAGE_DEVICE: cuda
+      # bfloat16 is native on Ampere and newer. On an older card use
+      # IMAGEINT_IMAGE_DTYPE=float16, which halves the VRAM need.
+      IMAGEINT_IMAGE_DTYPE: ${IMAGEINT_IMAGE_DTYPE:-bfloat16}
+      # VRAM is not the constraint any more, so the quantisation stays off.
+      IMAGEINT_IMAGE_QUANT: ${IMAGEINT_IMAGE_QUANT:-none}
+    deploy:
+      resources:
+        limits:
+          memory: ${IMAGEINT_MODEL_MEM_LIMIT_CUDA:-16g}
+        reservations:
+          memory: ${IMAGEINT_MODEL_MEM_RESERVATION_CUDA:-8g}
+          devices:
+            - driver: nvidia
+              count: ${IMAGEINT_GPU_COUNT:-all}
+              capabilities: [gpu]
