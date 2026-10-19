@@ -112,6 +112,7 @@ def test_health_reports_the_download_progress_of_a_component(client, fake):
             "files_total": 12,
             "current_file": "diffusion_pytorch_model-00002-of-00004.safetensors",
             "eta_seconds": 120,
+            "bytes_per_second": 5242880.0,
         },
     }
 
@@ -126,6 +127,20 @@ def test_health_reports_the_download_progress_of_a_component(client, fake):
     assert progress["files_total"] == 12
     assert progress["current_file"].endswith(".safetensors")
     assert progress["eta_seconds"] == 120
+    assert progress["bytes_per_second"] == 5242880.0
+
+
+def test_fresh_bypasses_the_health_cache(client_factory, fake):
+    with client_factory(IMAGEINT_HEALTH_CACHE_SECONDS="60") as client:
+        fake.reset_calls()
+        client.get("/v1/ready?fresh=1")
+        assert len([call for call in fake.calls if call[1] == "/health"]) == 2
+
+        client.get("/v1/ready")
+        assert len([call for call in fake.calls if call[1] == "/health"]) == 2
+
+        client.get("/v1/ready?fresh=1")
+        assert len([call for call in fake.calls if call[1] == "/health"]) == 4
 
 
 def test_health_omits_the_progress_while_nothing_downloads(client):

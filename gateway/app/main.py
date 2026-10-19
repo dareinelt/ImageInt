@@ -355,7 +355,16 @@ def _readiness_body(snapshot: dict) -> dict:
 
 
 async def _readiness(request: Request) -> JSONResponse:
-    snapshot = await runtime().health.snapshot()
+    # ``fresh=1`` bypasses the probe cache. The admin UI needs that to keep its
+    # download bars and the MB/s rate live while a model loads; ordinary
+    # clients leave it out and stay on the cached answer.
+    fresh = request.query_params.get("fresh", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    snapshot = await runtime().health.snapshot(force=fresh)
     body = _readiness_body(snapshot)
     headers = {}
     if not snapshot["ready"]:

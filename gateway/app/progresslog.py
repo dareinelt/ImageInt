@@ -83,6 +83,14 @@ def describe_download(label: str, progress: Mapping[str, Any]) -> str:
         else:
             parts.append(f"{format_bytes(downloaded)} geladen")
 
+    rate = progress.get("bytes_per_second")
+    if (
+        isinstance(rate, (int, float))
+        and not isinstance(rate, bool)
+        and rate > 0
+    ):
+        parts.append(f"{format_bytes(rate)}/s")
+
     files_downloaded = progress.get("files_downloaded")
     files_total = progress.get("files_total")
     if (

@@ -18,6 +18,7 @@ PROGRESS = {
     "files_total": 12,
     "current_file": "diffusion_pytorch_model-00002-of-00004.safetensors",
     "eta_seconds": 125,
+    "bytes_per_second": 5 * 1024**2,
 }
 
 LABELS = {"enhancer": "Prompt-Enhancer", "image": "Bildmodell"}
@@ -80,7 +81,7 @@ def test_formats_durations():
 def test_describes_a_download_with_all_fields():
     line = progresslog.describe_download("Bildmodell", PROGRESS)
     assert line == (
-        "Bildmodell: Download 42,5 %, 117,7 MB von 276,0 GB, Datei 3/12, "
+        "Bildmodell: Download 42,5 %, 117,7 MB von 276,0 GB, 5,0 MB/s, Datei 3/12, "
         "diffusion_pytorch_model-00002-of-00004.safetensors, noch 2 min 5 s"
     )
 
@@ -88,6 +89,13 @@ def test_describes_a_download_with_all_fields():
 def test_describes_an_unknown_total_with_bytes_only():
     line = progresslog.describe_download("Bildmodell", {"known": False, "bytes_downloaded": 5242880})
     assert line == "Bildmodell: Download 5,0 MB geladen"
+
+
+def test_describes_the_rate_on_its_own():
+    line = progresslog.describe_download(
+        "Bildmodell", {"known": False, "bytes_downloaded": 1024, "bytes_per_second": 2048}
+    )
+    assert line == "Bildmodell: Download 1 kB geladen, 2 kB/s"
 
 
 # -- reporting -------------------------------------------------------------- #

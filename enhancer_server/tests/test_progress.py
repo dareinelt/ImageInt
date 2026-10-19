@@ -231,6 +231,41 @@ def test_the_eta_follows_the_measured_rate(tmp_path):
     assert tracker.snapshot()["eta_seconds"] == 30
 
 
+def test_the_rate_is_reported_in_bytes_per_second(tmp_path):
+    directory = blobs_dir(tmp_path)
+    now = [0.0]
+    tracker = tracker_for(
+        tmp_path, FakeApi([sibling("a.bin", 400)]), clock=lambda: now[0]
+    )
+    tracker._read_model_info()
+
+    tracker._sample()
+    write_blob(directory, "abc", 100)
+    now[0] = 10.0
+    tracker._sample()
+
+    # 100 bytes in 10 s; the same window that drives the ETA.
+    assert tracker.snapshot()["bytes_per_second"] == 10.0
+
+
+def test_the_rate_is_reported_even_without_a_known_total(tmp_path):
+    directory = blobs_dir(tmp_path)
+    now = [0.0]
+    tracker = tracker_for(
+        tmp_path, FakeApi(error=RuntimeError("offline")), clock=lambda: now[0]
+    )
+
+    tracker._sample()
+    write_blob(directory, "abc", 50)
+    now[0] = 5.0
+    tracker._sample()
+
+    snapshot = tracker.snapshot()
+    assert snapshot["known"] is False
+    assert snapshot["bytes_per_second"] == 10.0
+    assert "eta_seconds" not in snapshot
+
+
 def test_a_shrinking_cache_does_not_report_a_negative_rate(tmp_path):
     directory = blobs_dir(tmp_path)
     now = [0.0]
@@ -246,6 +281,7 @@ def test_a_shrinking_cache_does_not_report_a_negative_rate(tmp_path):
     tracker._sample()
 
     assert tracker.snapshot().get("eta_seconds") is None
+    assert "bytes_per_second" not in tracker.snapshot()
 
 
 # --------------------------------------------------------------------------- #
@@ -279,6 +315,7 @@ def test_a_finished_load_reports_one_hundred_percent(tmp_path):
     assert snapshot["percent"] == 100.0
     assert snapshot["bytes_total"] == 400
     assert snapshot["eta_seconds"] == 0
+    assert snapshot["bytes_per_second"] == 0.0
 
 
 def test_the_snapshot_stays_json_serialisable(tmp_path):
