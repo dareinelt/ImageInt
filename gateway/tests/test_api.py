@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 
 import pytest
 
@@ -68,6 +69,16 @@ def test_ready_needs_no_token_and_reports_ready(client):
     assert body["state"] == "ready"
     assert body["components"]["enhancer"]["ready"] is True
     assert body["components"]["image"]["ready"] is True
+
+
+def test_startup_starts_the_progress_log(client_factory, caplog):
+    caplog.set_level(logging.INFO)
+    with client_factory(IMAGEINT_LOG_LEVEL="INFO", IMAGEINT_PROGRESS_LOG_SECONDS="20"):
+        pass
+
+    assert any(
+        "Download-Fortschritt" in record.getMessage() for record in caplog.records
+    )
 
 
 def test_ready_reports_a_loading_model_with_retry_after(client, fake):

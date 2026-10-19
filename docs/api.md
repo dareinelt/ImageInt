@@ -154,6 +154,12 @@ Die Werte stammen aus einem Poll des Blob-Verzeichnisses im Sekundentakt und
 werden mit dem übrigen Health-Ergebnis für `IMAGEINT_HEALTH_CACHE_SECONDS`
 gecacht; sie aktualisieren sich also höchstens in diesem Takt.
 
+Unabhängig von diesem API-Poll schreibt der Gateway den Fortschritt alle
+`IMAGEINT_PROGRESS_LOG_SECONDS` Sekunden (Standard 20, `0` deaktiviert) in sein
+eigenes Log. `docker compose logs -f gateway` zeigt den Kaltstart damit auch
+ohne Admin-Oberfläche; die Zeilen erscheinen nur, solange tatsächlich geladen
+wird, und enden mit einer `bereit`-Meldung je Komponente.
+
 ### `GET /v1/config`
 
 Die wirksame Konfiguration. Tokens werden maskiert ausgegeben.
