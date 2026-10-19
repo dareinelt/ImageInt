@@ -116,3 +116,32 @@ def test_parse_size_snaps_to_the_multiple_and_clamps():
 def test_parse_size_is_bounded_by_max_pixels():
     width, height = ratios.parse_size("8192x8192", max_pixels=1024 * 1024)
     assert width * height <= 1024 * 1024
+
+# --------------------------------------------------------------------------- #
+# describe() -- the ratio reported for a canvas that really exists
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "size,expected",
+    [
+        ((2048, 2048), "1:1"),
+        ((2400, 1792), "4:3"),
+        ((2528, 1696), "3:2"),
+        ((2752, 1536), "16:9"),
+        ((1536, 2752), "9:16"),
+        # Not a documented canvas: reduced to lowest terms.
+        ((1024, 768), "4:3"),
+        ((1000, 1000), "1:1"),
+    ],
+)
+def test_describe_names_the_canvas(size, expected):
+    assert ratios.describe(*size) == expected
+
+
+def test_describe_round_trips_every_documented_ratio():
+    for ratio in ratios.DOCUMENTED:
+        assert ratios.describe(*ratios.size_for(ratio)) == ratio
+
+
+@pytest.mark.parametrize("size", [(0, 0), (2048, 0), (0, 2048), (-8, -8)])
+def test_describe_returns_nothing_without_a_canvas(size):
+    assert ratios.describe(*size) == ""

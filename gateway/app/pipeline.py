@@ -47,6 +47,10 @@ async def run_generation(job: Job, settings: Settings, store: ImageStore) -> Non
         job.negative_prompt = negative_prompt
         job.width = width
         job.height = height
+        # The ratio is derived from the canvas, never taken from the enhancer's
+        # answer: an explicit request size and a skipped enhancer both have to
+        # produce a ratio that matches width/height.
+        job.wh_ratio = ratios.describe(width, height)
         job.seed = seed
         job.stage = "rendering"
 
@@ -76,6 +80,8 @@ async def run_generation(job: Job, settings: Settings, store: ImageStore) -> Non
             job.width = result["width"]
         if result["height"]:
             job.height = result["height"]
+        # Keep the reported ratio in step with the canvas the file really has.
+        job.wh_ratio = ratios.describe(job.width, job.height)
         if result["seed"] is not None:
             job.seed = result["seed"]
 
@@ -136,10 +142,10 @@ async def _enhance(job: Job, settings: Settings) -> tuple:
     job.timings["enhance_ms"] = result["latency_ms"]
     job.enhancer_model = result["model"]
     job.parse_ok = result["parse_ok"]
-    job.wh_ratio = result["wh_ratio"]
 
     # An explicit canvas always wins over the ratio the enhancer picked; a
-    # caller that names a size means it.
+    # caller that names a size means it. The reported ratio is derived from
+    # whichever canvas is applied, so it cannot contradict width/height.
     width, height = (result["width"], result["height"]) if not requested[0] else requested
 
     if not negative_prompt:

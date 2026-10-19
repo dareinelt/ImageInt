@@ -277,11 +277,15 @@ def test_enhance_is_503_while_the_enhancer_loads(client, fake):
 # Generation
 # --------------------------------------------------------------------------- #
 def test_generation_returns_the_finished_image(client, fake):
+    # Render the canvas the request asked for, so the metadata can be compared
+    # against the file that really exists (the fake defaults to 8x8).
+    fake.image_size = (2528, 1696)
     response = client.post(GENERATE, json={"prompt": "Ein roter Panda im Schnee"})
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["ok"] is True
     assert body["status"] == "done"
+    assert (body["width"], body["height"]) == (2528, 1696)
     assert body["wh_ratio"] == "3:2"
     assert base64.b64decode(body["b64_json"]).startswith(b"\x89PNG")
     assert body["status_url"].endswith(f"/v1/jobs/{body['job_id']}")
@@ -328,6 +332,24 @@ def test_a_disabled_enhancer_still_honours_an_explicit_request(client_factory, f
 def test_generation_honours_an_explicit_ratio(client, fake):
     client.post(GENERATE, json={"prompt": "Ein Berg", "ratio": "16:9"})
     assert fake.image_requests[-1]["size"] == "2752x1536"
+
+
+def test_wh_ratio_describes_an_explicitly_requested_size(client, fake):
+    # An explicit size wins over the enhancer's 3:2, so the reported ratio has
+    # to follow the canvas that is really rendered -- not the enhancer's answer.
+    fake.image_size = (1024, 768)
+    body = client.post(GENERATE, json={"prompt": "Ein Berg", "size": "1024x768"}).json()
+    assert (body["width"], body["height"]) == (1024, 768)
+    assert body["wh_ratio"] == "4:3"
+
+
+def test_wh_ratio_is_reported_without_the_enhancer(client, fake):
+    # Skipping the enhancer leaves nobody to name a ratio, and an empty
+    # wh_ratio would be indistinguishable from "the model ignored it".
+    fake.image_size = (2048, 2048)
+    body = client.post(GENERATE, json={"prompt": "Ein Berg", "enhance": False}).json()
+    assert (body["width"], body["height"]) == (2048, 2048)
+    assert body["wh_ratio"] == "1:1"
 
 
 def test_generation_uses_the_chat_route_when_configured(client_factory, fake):

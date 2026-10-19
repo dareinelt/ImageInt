@@ -9,10 +9,16 @@ of a path.
 Writes are atomic -- temporary file plus ``os.replace`` -- so a reader never
 observes a half-written PNG, and a crashed container leaves no truncated image
 that would later be served as if it were complete.
+
+Next to the images the store keeps one small JSON record per finished job in the
+``.jobs`` subdirectory. Without it a restart would lose the job ids -- the only
+handle a client has -- and the images would be unreachable even though their
+bytes are still on the volume. The records are written the same atomic way.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -34,6 +40,16 @@ _SUFFIX = {
 }
 _SUFFIX_TO_TYPE = {suffix: kind for kind, suffix in _SUFFIX.items()}
 
+#: Subdirectory holding one JSON record per finished job.
+_META_DIR = ".jobs"
+_META_SUFFIX = ".json"
+
+
+def valid_job_id(job_id: str) -> bool:
+    """Whether a string may be used as a job id, i.e. as part of a path."""
+
+    return bool(_ID_RE.match(job_id or ""))
+
 
 class ImageStore:
     """The image directory, with job-id addressed reads and writes."""
@@ -45,6 +61,12 @@ class ImageStore:
         """Create the directory if it does not exist yet."""
 
         self.directory.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def meta_dir(self) -> Path:
+        """Where the job records live, next to the images they describe."""
+
+        return self.directory / _META_DIR
 
     def path(self, job_id: str) -> Optional[Path]:
         """Existing file of one job, or ``None``."""
@@ -112,12 +134,92 @@ class ImageStore:
             return False
         return True
 
+    # -- job records ------------------------------------------------------- #
+
+    def write_meta(self, job_id: str, record: dict) -> bool:
+        """Persist one job record, atomically, next to its image."""
+
+        if not _ID_RE.match(job_id or ""):
+            return False
+        if self.path(job_id) is None:
+            # A record without an image would only produce a dead status_url.
+            return False
+        try:
+            self.meta_dir.mkdir(parents=True, exist_ok=True)
+            payload = json.dumps(record, ensure_ascii=False, sort_keys=True)
+            temporary = self.meta_dir / f".{job_id}.{os.getpid()}.part"
+            temporary.write_text(payload, encoding="utf-8")
+            os.replace(temporary, self.meta_dir / f"{job_id}{_META_SUFFIX}")
+        except (OSError, TypeError, ValueError) as exc:
+            log.warning("Auftragsdaten von %s sind nicht schreibbar: %s", job_id, exc)
+            return False
+        return True
+
+    def read_meta(self) -> dict:
+        """Every readable job record, keyed by job id. Broken ones are skipped."""
+
+        if not self.meta_dir.is_dir():
+            return {}
+        records = {}
+        for entry in self.meta_dir.iterdir():
+            if not entry.is_file() or entry.suffix != _META_SUFFIX:
+                continue
+            job_id = entry.stem
+            if not _ID_RE.match(job_id):
+                continue
+            try:
+                record = json.loads(entry.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                log.warning("Auftragsdaten von %s sind nicht lesbar: %s", job_id, exc)
+                continue
+            if isinstance(record, dict):
+                record.setdefault("job_id", job_id)
+                records[job_id] = record
+        return records
+
+    def delete_meta(self, job_id: str) -> bool:
+        """Remove the record of one job, if it has one."""
+
+        if not _ID_RE.match(job_id or ""):
+            return False
+        try:
+            (self.meta_dir / f"{job_id}{_META_SUFFIX}").unlink()
+        except OSError:
+            return False
+        return True
+
+    def cleanup_meta(self, keep: set) -> int:
+        """Drop records of jobs that are gone, plus leftovers of a failed write."""
+
+        if not self.meta_dir.is_dir():
+            return 0
+        removed = 0
+        for entry in self.meta_dir.iterdir():
+            if not entry.is_file():
+                continue
+            if entry.name.endswith(".part"):
+                try:
+                    entry.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+                continue
+            if entry.stem in keep and self.path(entry.stem) is not None:
+                continue
+            try:
+                entry.unlink()
+                removed += 1
+            except OSError:
+                pass
+        return removed
+
     def cleanup(self, keep: set) -> int:
         """Delete every stored image whose job id is not in ``keep``.
 
-        Called after the job registry pruned itself, so a restart that lost the
-        registry does not leave the volume to grow forever. Leftovers of an
-        interrupted write are removed as well.
+        Called after the job registry restored what a restart can still serve
+        and pruned itself, so neither the volume grows forever nor a finished
+        image loses its job. Leftovers of an interrupted write are removed as
+        well.
         """
 
         if not self.directory.is_dir():

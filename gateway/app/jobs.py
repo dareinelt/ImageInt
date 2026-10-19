@@ -16,8 +16,9 @@ would turn a second chat request into an error for no good reason. The queue is
 bounded by ``IMAGEINT_MAX_QUEUED_JOBS``; beyond that the endpoint answers 503
 ``busy`` with a ``Retry-After``, which is a state the client can act on.
 
-The registry holds no state a restart must preserve: it lives in memory, and
-images on disk are cleaned up against it (see :mod:`app.storage`). A job that
+The registry keeps the live jobs in memory and writes one JSON record per
+*finished* job to the store, so a restart does not orphan the images: a client
+that polls a ``status_url`` across a restart still gets its picture. A job that
 was running when the container died is simply gone, which is honest -- its image
 does not exist.
 """
@@ -33,7 +34,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 from .config import Settings
 from .errors import busy, not_found
-from .storage import ImageStore
+from .storage import ImageStore, valid_job_id
 
 log = logging.getLogger("imageint.jobs")
 
@@ -124,6 +125,84 @@ class Job:
         path = f"/v1/images/{self.id}"
         return f"{base}{path}" if base else path
 
+    #: The fields that survive a restart. Everything here is metadata a client
+    #: reads back from ``GET /v1/jobs/{id}``; the image itself is the file.
+    PERSISTED = (
+        "prompt",
+        "request",
+        "created_at",
+        "started_at",
+        "finished_at",
+        "stage",
+        "enhanced_prompt",
+        "negative_prompt",
+        "wh_ratio",
+        "width",
+        "height",
+        "seed",
+        "parse_ok",
+        "model",
+        "enhancer_model",
+        "timings",
+        "content_type",
+    )
+
+    def record(self) -> dict:
+        """The on-disk representation of a finished job."""
+
+        payload = {name: getattr(self, name) for name in self.PERSISTED}
+        payload["job_id"] = self.id
+        payload["status"] = self.status
+        return payload
+
+    @classmethod
+    def from_record(cls, record: dict) -> Optional["Job"]:
+        """Rebuild a job from :meth:`record`, or ``None`` when the record is junk."""
+
+        job_id = str(record.get("job_id") or "")
+        if not valid_job_id(job_id):
+            return None
+        try:
+            job = cls(
+                id=job_id,
+                prompt=str(record.get("prompt") or ""),
+                request=dict(record.get("request") or {}),
+            )
+            job.status = DONE if record.get("status") == DONE else ERROR
+            job.created_at = float(record.get("created_at") or job.created_at)
+            job.started_at = _optional_float(record.get("started_at"))
+            job.finished_at = _optional_float(record.get("finished_at"))
+            job.stage = str(record.get("stage") or job.status)
+            job.enhanced_prompt = str(record.get("enhanced_prompt") or "")
+            job.negative_prompt = str(record.get("negative_prompt") or "")
+            job.wh_ratio = str(record.get("wh_ratio") or "")
+            job.width = int(record.get("width") or 0)
+            job.height = int(record.get("height") or 0)
+            job.seed = _optional_int(record.get("seed"))
+            parse_ok = record.get("parse_ok")
+            job.parse_ok = None if parse_ok is None else bool(parse_ok)
+            job.model = str(record.get("model") or "")
+            job.enhancer_model = str(record.get("enhancer_model") or "")
+            job.timings = dict(record.get("timings") or {})
+            job.content_type = str(record.get("content_type") or "")
+        except (TypeError, ValueError):
+            return None
+        return job
+
+
+def _optional_float(value) -> Optional[float]:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_int(value) -> Optional[int]:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
 
 #: The pipeline signature: take a job, fill it in, return the same job. It must
 #: not raise for expected upstream failures -- those belong in ``job.status``.
@@ -206,6 +285,10 @@ class JobRegistry:
                         job.error_message = job.error_message or "Unbekannter Fehler."
                 job.finished_at = time.time()
                 job._finished.set()
+                if job.status == DONE:
+                    # The image is on disk; without this record a restart would
+                    # lose the only id under which a client can fetch it.
+                    self.store.write_meta(job.id, job.record())
                 log.info(
                     "Bildauftrag %s beendet: %s (%.1f s).",
                     job.id,
@@ -300,6 +383,7 @@ class JobRegistry:
             if now - (job.finished_at or job.created_at) > self.settings.job_retention_seconds:
                 self._jobs.pop(job_id, None)
                 self.store.delete(job_id)
+                self.store.delete_meta(job_id)
                 removed += 1
 
         finished = [job for job in self._jobs.values() if job.done]
@@ -308,16 +392,62 @@ class JobRegistry:
             for job in finished[: len(finished) - self.settings.max_jobs]:
                 self._jobs.pop(job.id, None)
                 self.store.delete(job.id)
+                self.store.delete_meta(job.id)
                 removed += 1
 
         if removed:
             log.info("%d abgeschlossene Bildaufträge aus dem Verzeichnis entfernt.", removed)
         return removed
 
-    def cleanup_store(self) -> int:
-        """Remove files on disk that belong to no known job (e.g. after restart)."""
+    def restore(self) -> int:
+        """Reload the finished jobs a previous run left on the volume.
 
-        return self.store.cleanup(set(self._jobs))
+        Returns how many jobs came back. Records whose image is gone are
+        dropped, and so is a record whose JSON no longer parses: a broken
+        sidecar must never turn into a job that answers 500.
+        """
+
+        restored = 0
+        now = time.time()
+        for job_id, record in self.store.read_meta().items():
+            if job_id in self._jobs:
+                continue
+            if self.store.path(job_id) is None:
+                self.store.delete_meta(job_id)
+                continue
+            job = Job.from_record(record)
+            if job is None:
+                self.store.delete_meta(job_id)
+                continue
+            if now - (job.finished_at or job.created_at) > self.settings.job_retention_seconds:
+                # Expired while the container was down; retention applies
+                # across the restart, so the volume cannot grow forever.
+                self.store.delete(job_id)
+                self.store.delete_meta(job_id)
+                continue
+            job.image_bytes = self.store.size(job_id)
+            if not job.content_type:
+                job.content_type = self.store.content_type(job_id)
+            # A restored job is finished by definition, so anything waiting on
+            # it must not block.
+            job._finished.set()
+            self._jobs[job_id] = job
+            restored += 1
+
+        if restored:
+            log.info(
+                "%d abgeschlossene(r) Bildauftrag/Aufträge aus dem Speicher "
+                "wiederhergestellt.",
+                restored,
+            )
+        # The count cap is applied on top of the restored set.
+        self.prune()
+        return restored
+
+    def cleanup_store(self) -> int:
+        """Remove files and records that belong to no known job."""
+
+        return self.store.cleanup(set(self._jobs)) + self.store.cleanup_meta(set(self._jobs))
 
     async def shutdown(self) -> None:
         """Cancel everything still running, so the container stops promptly."""

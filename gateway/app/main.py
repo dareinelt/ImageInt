@@ -114,12 +114,16 @@ async def lifespan(app: FastAPI):
 
     _runtime = Runtime(settings)
     _runtime.store.ensure()
-    # A restart loses the in-memory registry, so files from the previous run are
-    # orphans by definition; removing them keeps the volume from growing.
+    # A restart loses the in-memory registry, but not the finished images: their
+    # job records are on the volume, so a status_url keeps working. Only what
+    # has no record (an interrupted render, a deleted job) is an orphan.
+    restored = _runtime.registry.restore()
     removed = _runtime.registry.cleanup_store()
     log.info(
-        "Bildspeicher %s bereit (%d verwaiste Datei(en) entfernt).",
+        "Bildspeicher %s bereit (%d Auftrag/Aufträge wiederhergestellt, "
+        "%d verwaiste Datei(en) entfernt).",
         settings.storage_dir,
+        restored,
         removed,
     )
     log.info(

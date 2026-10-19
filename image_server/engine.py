@@ -168,6 +168,7 @@ class BaseEngine:
             "device": self.settings.device,
             "dtype": self.settings.dtype,
             "quant": self.settings.quant,
+            "gpu_utilization": self.settings.gpu_utilization,
             "state": self._state,
             "loaded": self._state == "ready",
             "loading": self._state in ("idle", "loading"),
@@ -231,6 +232,9 @@ class DiffusersEngine(BaseEngine):
         if self.settings.cpu_threads:
             torch.set_num_threads(self.settings.cpu_threads)
 
+        if self.settings.device == "cuda":
+            self._limit_device_memory(torch)
+
         dtype = getattr(torch, self.settings.dtype, None)
         if dtype is None:
             raise EngineError(f"Unbekannter dtype: {self.settings.dtype}")
@@ -255,6 +259,30 @@ class DiffusersEngine(BaseEngine):
         # fastest way to hand the memory back on shutdown.
         self._pipe = None
         super().close()
+
+    def _limit_device_memory(self, torch) -> None:
+        """Cap the VRAM this process may allocate.
+
+        ``IMAGEINT_IMAGE_GPU_UTILIZATION`` (filled from
+        ``IMAGEINT_MODEL_GPU_UTILIZATION`` in the compose files) is the knob for
+        a GPU that is shared with another service. It has to be applied before
+        the weights are allocated, otherwise it only limits later allocations,
+        so it runs first in :meth:`_load`.
+        """
+
+        fraction = self.settings.gpu_utilization
+        if fraction <= 0:
+            return
+        if not torch.cuda.is_available():
+            log.warning(
+                "[image] GPU-Auslastung %.2f konfiguriert, aber CUDA ist nicht "
+                "verfügbar; die Grenze bleibt wirkungslos.",
+                fraction,
+            )
+            return
+        device = torch.cuda.current_device()
+        torch.cuda.set_per_process_memory_fraction(fraction, device)
+        log.info("[image] VRAM-Grenze: %.0f %% von Gerät %d.", fraction * 100, device)
 
     def _quantization_config(self, diffusers):
         """Translate ``IMAGEINT_IMAGE_QUANT`` into a pipeline quantization config.

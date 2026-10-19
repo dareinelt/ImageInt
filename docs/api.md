@@ -348,7 +348,7 @@ Die Anfrage war innerhalb von `IMAGEINT_SYNC_TIMEOUT` fertig.
   "stage": "done",
   "prompt": "Ein roter Panda im Schnee",
   "created_at": 1738000000.1, "started_at": 1738000000.2, "finished_at": 1738000143.7,
-  "width": 2400, "height": 1350, "wh_ratio": 1.7777778, "seed": 1234,
+  "width": 2752, "height": 1536, "wh_ratio": "16:9", "seed": 1234,
   "model": "Qwen/Qwen-Image-2.1",
   "parse_ok": true,
   "timings": {"enhance": 41.2, "render": 102.3},
@@ -468,7 +468,7 @@ curl -s -X POST localhost:8080/v1/enhance \
   "ok": true,
   "prompt": "Ein roter Panda im Schnee",
   "enhanced_prompt": "A photorealistic close-up of a red panda …",
-  "wh_ratio": 1.7777778,
+  "wh_ratio": "16:9",
   "parse_ok": true,
   "width": 2752, "height": 1536,
   "timings": {"enhance": 38.4}
@@ -482,7 +482,11 @@ curl -s -X POST localhost:8080/v1/enhance \
 ### Leinwände
 
 `wh_ratio` aus dem Enhancer wird auf eine der dokumentierten Leinwände
-abgebildet; die dokumentierten Größen werden **unverändert** verwendet.
+abgebildet; die dokumentierten Größen werden **unverändert** verwendet. Das
+Feld `wh_ratio` in den Antworten ist immer ein Verhältnis-String (`"16:9"`,
+nicht `1.7778`) und beschreibt die Leinwand, die tatsächlich gerendert wurde —
+auch dann, wenn ein `size` in der Anfrage die Wahl des Enhancers überschrieben
+hat und auch dann, wenn `enhance: false` gesetzt war.
 
 | Verhältnis | Breite | Höhe | Pixel |
 |---|---|---|---|
@@ -491,8 +495,8 @@ abgebildet; die dokumentierten Größen werden **unverändert** verwendet.
 | 9:16 | 1536 | 2752 | 4.227.072 |
 | 4:3 | 2400 | 1792 | 4.300.800 |
 | 3:4 | 1792 | 2400 | 4.300.800 |
-| 3:2 | 2400 | 1696 | 4.070.400 |
-| 2:3 | 1696 | 2400 | 4.070.400 |
+| 3:2 | 2528 | 1696 | 4.287.488 |
+| 2:3 | 1696 | 2528 | 4.287.488 |
 
 Ein **nicht** dokumentiertes Verhältnis wird auf dieselbe Fläche wie das native
 2K-Bild abgebildet, auf ein Vielfaches von 64 gerundet und auf
