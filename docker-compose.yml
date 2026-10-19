@@ -284,6 +284,10 @@ services:
       IMAGEINT_IMAGE_TRUE_CFG_SCALE: ${IMAGEINT_IMAGE_TRUE_CFG_SCALE:-1.0}
       IMAGEINT_IMAGE_NEGATIVE_PROMPT: ${IMAGEINT_IMAGE_NEGATIVE_PROMPT:-}
       IMAGEINT_IMAGE_MAX_PIXELS: ${IMAGEINT_IMAGE_MAX_PIXELS:-4300800}
+      # CUDA only: share of VRAM the pipeline may allocate. 0 disables the cap.
+      # The left-hand name is what the server reads; the right-hand one is the
+      # shared limit the .env file documents.
+      IMAGEINT_IMAGE_GPU_UTILIZATION: ${IMAGEINT_MODEL_GPU_UTILIZATION:-0.90}
       # Prefix KV cache of the DiT. Saves a lot of work on a CPU host.
       IMAGEINT_IMAGE_KV_CACHE: ${IMAGEINT_IMAGE_KV_CACHE:-true}
       # Artificial delay of the stub engine, in seconds. Only meaningful with

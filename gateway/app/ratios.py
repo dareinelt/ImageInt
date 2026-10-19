@@ -66,6 +66,24 @@ def normalize(raw: str) -> str:
     return f"{left // divisor}:{right // divisor}"
 
 
+def describe(width: int, height: int) -> str:
+    """The ratio string for an actual canvas.
+
+    The documented ratios come back verbatim (``"16:9"``); any other canvas is
+    reduced to its lowest terms (``"4:3"`` for 1024x768). This is what the
+    gateway reports as ``wh_ratio``, so the value always describes the file that
+    exists rather than the ratio somebody asked for.
+    """
+
+    if width <= 0 or height <= 0:
+        return ""
+    for ratio, (documented_width, documented_height) in DOCUMENTED.items():
+        if (width, height) == (documented_width, documented_height):
+            return ratio
+    divisor = math.gcd(width, height)
+    return f"{width // divisor}:{height // divisor}"
+
+
 def _snap(value: float) -> int:
     return max(MIN_SIDE, int(round(value / MULTIPLE)) * MULTIPLE)
 

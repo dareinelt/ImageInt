@@ -150,6 +150,11 @@ class Settings:
     use_kv_cache: bool = True
     #: Upper length of an accepted prompt.
     max_prompt_chars: int = 4000
+    #: CUDA only: share of the device memory the process may allocate. ``0``
+    #: leaves torch's default (all of it). Set through
+    #: ``IMAGEINT_IMAGE_GPU_UTILIZATION``, which the compose files fill from
+    #: ``IMAGEINT_MODEL_GPU_UTILIZATION``.
+    gpu_utilization: float = 0.0
     #: Artificial delay of the stub engine, in seconds, so a slow render can be
     #: demonstrated without a model.
     stub_delay: float = 0.0
@@ -191,6 +196,7 @@ def load_settings() -> Settings:
         ),
         use_kv_cache=_flag("IMAGEINT_IMAGE_KV_CACHE", True),
         max_prompt_chars=_number("IMAGEINT_IMAGE_MAX_PROMPT_CHARS", 4000, 1, 100000),
+        gpu_utilization=_decimal("IMAGEINT_IMAGE_GPU_UTILIZATION", 0.0, 0.0, 1.0),
         stub_delay=_decimal("IMAGEINT_IMAGE_STUB_DELAY", 0.0, 0.0, 3600.0),
         cache_dir=_text("IMAGEINT_IMAGE_CACHE_DIR", ""),
     )

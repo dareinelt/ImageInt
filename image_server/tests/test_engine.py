@@ -505,3 +505,55 @@ def test_load_settings_round_trip_is_used_by_the_engine(monkeypatch):
     monkeypatch.setenv("IMAGEINT_IMAGE_ENGINE", "stub")
     settings = load_settings()
     assert isinstance(build_engine(settings), StubEngine)
+
+# --------------------------------------------------------------------------- #
+# IMAGEINT_IMAGE_GPU_UTILIZATION -- the CUDA memory cap
+# --------------------------------------------------------------------------- #
+class FakeCuda:
+    """Just enough of ``torch.cuda`` to observe the cap being applied."""
+
+    def __init__(self, available: bool = True) -> None:
+        self.available = available
+        self.calls: list = []
+
+    def is_available(self) -> bool:
+        return self.available
+
+    def current_device(self) -> int:
+        return 0
+
+    def set_per_process_memory_fraction(self, fraction, device) -> None:
+        self.calls.append((fraction, device))
+
+
+class FakeTorch:
+    def __init__(self, available: bool = True) -> None:
+        self.cuda = FakeCuda(available)
+
+
+def test_the_vram_cap_is_applied_before_the_weights_are_loaded():
+    engine = DiffusersEngine(stub_settings(device="cuda", gpu_utilization=0.75))
+    torch = FakeTorch()
+    engine._limit_device_memory(torch)
+    assert torch.cuda.calls == [(0.75, 0)]
+
+
+def test_a_gpu_utilization_of_zero_leaves_torch_alone():
+    # 0 is the default and means "no cap", so a CPU host is unaffected.
+    engine = DiffusersEngine(stub_settings(device="cpu", gpu_utilization=0.0))
+    torch = FakeTorch()
+    engine._limit_device_memory(torch)
+    assert torch.cuda.calls == []
+
+
+def test_a_cap_without_cuda_is_reported_and_harmless(caplog):
+    engine = DiffusersEngine(stub_settings(device="cuda", gpu_utilization=0.9))
+    torch = FakeTorch(available=False)
+    engine._limit_device_memory(torch)
+    assert torch.cuda.calls == []
+    assert any("wirkungslos" in record.message for record in caplog.records)
+
+
+def test_status_reports_the_gpu_utilization():
+    engine = DiffusersEngine(stub_settings(device="cuda", gpu_utilization=0.5))
+    assert engine.status()["gpu_utilization"] == 0.5

@@ -293,6 +293,81 @@ async def test_cleanup_store_drops_orphaned_files(registry_factory):
     assert registry.store.path("verwaisterauftrag") is None
 
 
+class WritesImage:
+    """A runner that stores an image and finishes, like the real pipeline."""
+
+    def __init__(self) -> None:
+        self.store = None
+
+    async def __call__(self, job) -> None:
+        self.store.write(job.id, png_bytes((8, 8)))
+        job.status = DONE
+        job.image_bytes = 8
+        job.width, job.height, job.wh_ratio = 8, 8, "1:1"
+        job.content_type = "image/png"
+        job.enhanced_prompt = "ein rotes Haus"
+
+
+async def test_a_finished_job_survives_a_restart(registry_factory):
+    runner = WritesImage()
+    registry = registry_factory(runner)
+    runner.store = registry.store
+    job = registry.submit("ein rotes Haus")
+    await registry.wait(job, 5)
+    assert job.status == DONE
+
+    # A restart: same volume, empty registry.
+    async def never(job):  # pragma: no cover - a restored job never runs again
+        raise AssertionError("ein wiederhergestellter Auftrag darf nicht erneut laufen")
+
+    restarted = registry_factory(never)
+    assert restarted.find(job.id) is None
+    assert restarted.restore() == 1
+
+    restored = restarted.find(job.id)
+    assert restored is not None
+    assert restored.status == DONE
+    assert restored.prompt == "ein rotes Haus"
+    assert restored.enhanced_prompt == "ein rotes Haus"
+    assert restored.wh_ratio == "1:1"
+    assert restored.image_bytes == len(png_bytes((8, 8)))
+    assert restarted.image(job.id) == png_bytes((8, 8))
+    # The record and the image belong to a live job, so nothing is orphaned.
+    assert restarted.cleanup_store() == 0
+    assert restarted.find(job.id) is not None
+
+
+async def test_a_record_without_its_image_is_dropped(registry_factory):
+    runner = WritesImage()
+    registry = registry_factory(runner)
+    runner.store = registry.store
+    job = registry.submit("ein rotes Haus")
+    await registry.wait(job, 5)
+    registry.store.delete(job.id)
+
+    restarted = registry_factory(runner)
+    assert restarted.restore() == 0
+    assert restarted.find(job.id) is None
+    assert restarted.store.read_meta() == {}
+
+
+async def test_an_expired_job_is_not_restored(registry_factory):
+    runner = WritesImage()
+    registry = registry_factory(runner, job_retention_seconds=60)
+    runner.store = registry.store
+    job = registry.submit("ein rotes Haus")
+    await registry.wait(job, 5)
+    # Age the record beyond the retention window instead of waiting for it.
+    record = registry.store.read_meta()[job.id]
+    record["finished_at"] = job.finished_at - 3600
+    registry.store.write_meta(job.id, record)
+
+    restarted = registry_factory(runner, job_retention_seconds=60)
+    assert restarted.restore() == 0
+    assert restarted.find(job.id) is None
+    assert restarted.store.path(job.id) is None
+
+
 async def test_public_view_reports_the_image_url_once_done(registry_factory):
     async def runner(job):
         job.status = DONE

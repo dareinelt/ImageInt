@@ -161,3 +161,12 @@ def test_snap(value, expected):
 def test_snap_always_returns_a_multiple_of_the_grid():
     for value in range(1, 5000, 37):
         assert config.snap(value) % config.MULTIPLE == 0
+
+def test_the_gpu_utilization_is_read_from_the_environment(monkeypatch):
+    monkeypatch.setenv("IMAGEINT_IMAGE_GPU_UTILIZATION", "0.6")
+    assert config.load_settings().gpu_utilization == 0.6
+
+
+def test_the_gpu_utilization_is_clamped(monkeypatch):
+    monkeypatch.setenv("IMAGEINT_IMAGE_GPU_UTILIZATION", "1.5")
+    assert config.load_settings().gpu_utilization == 1.0

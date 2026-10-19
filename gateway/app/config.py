@@ -187,7 +187,11 @@ class Settings:
     log_level: str = "INFO"
     health_cache_seconds: int = 5
     loading_retry_after: int = 15
-    starting_grace_seconds: int = 900
+    #: How long after its own start the gateway treats an unreachable model
+    #: server as "still starting" instead of "broken". Must cover the first
+    #: container start, where the image server downloads ~33 GB and then warms
+    #: up a CPU pipeline -- hence the same 1800 s the compose files use.
+    starting_grace_seconds: int = 1800
     #: How often the gateway writes the model servers' download progress to its
     #: own log, so ``docker compose logs -f gateway`` shows the cold start.
     #: ``0`` disables the lines.
@@ -230,7 +234,7 @@ def load_settings() -> Settings:
         log_level=log_level,
         health_cache_seconds=_number("IMAGEINT_HEALTH_CACHE_SECONDS", 5, 0, 300),
         loading_retry_after=_number("IMAGEINT_LOADING_RETRY_AFTER", 15, 1, 3600),
-        starting_grace_seconds=_number("IMAGEINT_STARTING_GRACE_SECONDS", 900, 0, 86400),
+        starting_grace_seconds=_number("IMAGEINT_STARTING_GRACE_SECONDS", 1800, 0, 86400),
         progress_log_seconds=_number("IMAGEINT_PROGRESS_LOG_SECONDS", 20, 0, 86400),
         sync_timeout_seconds=_number("IMAGEINT_SYNC_TIMEOUT", 120, 0, 7200),
         max_concurrent_jobs=_number("IMAGEINT_MAX_CONCURRENT_JOBS", 1, 1, 64),

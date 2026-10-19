@@ -189,7 +189,7 @@ strukturierten Prompt umschreibt, auf den das Bildmodell trainiert wurde, und
 dabei zusätzlich das Seitenverhältnis wählt:
 
 ```json
-{"rewritten_prompt": "…", "wh_ratio": 1.7777778}
+{"rewritten_prompt": "…", "wh_ratio": "16:9"}
 ```
 
 Sein System-Prompt ist Teil des Checkpoints und liegt **wörtlich** in
@@ -424,7 +424,7 @@ kann.
   "job_id": "8f3c1a2b4d5e6f70",
   "status": "done",
   "prompt": "Ein roter Panda im Schnee",
-  "width": 2400, "height": 1350, "wh_ratio": 1.7778, "seed": 1234,
+  "width": 2752, "height": 1536, "wh_ratio": "16:9", "seed": 1234,
   "image_url": "http://localhost:8080/v1/images/8f3c1a2b4d5e6f70",
   "status_url": "http://localhost:8080/v1/jobs/8f3c1a2b4d5e6f70",
   "b64_json": "iVBORw0KGgo…",
@@ -468,6 +468,13 @@ Grafik", „Zeige mir ein Bild von …"). Details und der vollständige Ablauf:
 
 ## E-Mail-Benachrichtigung
 
+Der Versand liegt **nicht** in ImageInt, sondern in LLMInt (`api/image_notify.php`
+und `lib/mailer.php`). ImageInt liefert dafür nur die Bausteine: eine `image_url`
+und eine `status_url`, die einen Gateway-Neustart überleben, sowie das
+Aufbewahrungsfenster `IMAGEINT_JOB_RETENTION_SECONDS` (Standard 24 h), das lang
+genug sein muss, damit der Link aus der Mail noch greift. Wer die Mail
+abschaltet oder umbaut, ändert LLMInt — nicht dieses Repository.
+
 Weil eine Generierung Minuten dauern kann, kann der Nutzer per E-Mail über die
 Fertigstellung informiert werden — **nur mit Zustimmung**:
 
@@ -477,7 +484,7 @@ Fertigstellung informiert werden — **nur mit Zustimmung**:
 Die Mail enthält einen Deep-Link, der direkt in den Chat mit dem fertig
 generierten Bild springt. **Mail-Text und Zustimmungsfrage sind über Platzhalter
 voll individualisierbar** (dasselbe `{placeholder}`-Muster wie bei der
-Registrierungsmail in LLMInt):
+Registrierungsmail in LLMInt); gefüllt werden sie von LLMInt:
 
 | Platzhalter | Inhalt |
 |---|---|
