@@ -257,19 +257,38 @@ class DiffusersEngine(BaseEngine):
         super().close()
 
     def _quantization_config(self, diffusers):
-        """Translate ``IMAGEINT_IMAGE_QUANT`` into a diffusers config."""
+        """Translate ``IMAGEINT_IMAGE_QUANT`` into a pipeline quantization config.
+
+        diffusers>=0.41.0 rejects a bare backend config here -- it wants a
+        ``PipelineQuantizationConfig`` that maps a component name to a config --
+        so ``int8``/``int4`` used to fail the whole load with a ``ValueError``.
+        The transformer is a diffusers model and the text encoder is a
+        transformers model, and each side has its own ``QuantoConfig`` flavour.
+        """
 
         quant = self.settings.quant
         if quant == "none":
             return None
         try:
+            from diffusers.quantizers import PipelineQuantizationConfig
             from diffusers.quantizers.quantization_config import QuantoConfig
+            from transformers.utils.quantization_config import (
+                QuantoConfig as TransformersQuantoConfig,
+            )
         except ImportError as exc:
             raise EngineError(
-                f"Quantisierung {quant} braucht optimum-quanto "
-                "(pip install optimum-quanto)."
+                f"Quantisierung {quant} braucht diffusers>=0.41.0, transformers "
+                "und optimum-quanto (pip install optimum-quanto)."
             ) from exc
-        return QuantoConfig(weights_dtype=quant)
+
+        # Only the two components that dominate the footprint are quantised;
+        # the VAE is 1.4 GB and int8 weights visibly hurt its output.
+        return PipelineQuantizationConfig(
+            quant_mapping={
+                "transformer": QuantoConfig(weights_dtype=quant),
+                "text_encoder": TransformersQuantoConfig(weights=quant),
+            }
+        )
 
     def _render(self, request: RenderRequest) -> tuple[bytes, dict]:
         torch = self._torch()

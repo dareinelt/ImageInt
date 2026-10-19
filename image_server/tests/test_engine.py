@@ -430,6 +430,77 @@ def test_quantisation_config_is_only_built_when_requested():
     assert engine._quantization_config(types.SimpleNamespace()) is None
 
 
+def _fake_quant_modules(monkeypatch):
+    """A diffusers/transformers pair that exposes only the quantisation configs.
+
+    diffusers>=0.41.0 wants a ``PipelineQuantizationConfig`` that maps a
+    component name to a config, and each library has its own ``QuantoConfig``.
+    """
+
+    class FakeQuantoConfig:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakePipelineQuantizationConfig:
+        def __init__(self, quant_mapping=None):
+            self.quant_mapping = quant_mapping or {}
+
+    diffusers = types.ModuleType("diffusers")
+    quantizers = types.ModuleType("diffusers.quantizers")
+    quantizers.PipelineQuantizationConfig = FakePipelineQuantizationConfig
+    diffusers_quant = types.ModuleType("diffusers.quantizers.quantization_config")
+    diffusers_quant.QuantoConfig = FakeQuantoConfig
+
+    transformers = types.ModuleType("transformers")
+    transformers_utils = types.ModuleType("transformers.utils")
+    transformers_quant = types.ModuleType("transformers.utils.quantization_config")
+    transformers_quant.QuantoConfig = FakeQuantoConfig
+
+    diffusers.quantizers = quantizers
+    transformers.utils = transformers_utils
+    transformers_utils.quantization_config = transformers_quant
+
+    for name, module in (
+        ("diffusers", diffusers),
+        ("diffusers.quantizers", quantizers),
+        ("diffusers.quantizers.quantization_config", diffusers_quant),
+        ("transformers", transformers),
+        ("transformers.utils", transformers_utils),
+        ("transformers.utils.quantization_config", transformers_quant),
+    ):
+        monkeypatch.setitem(sys.modules, name, module)
+
+    return FakePipelineQuantizationConfig
+
+
+@pytest.mark.parametrize("quant", ["int8", "int4"])
+def test_quantisation_maps_the_components_diffusers_expects(monkeypatch, quant):
+    """A bare ``QuantoConfig`` is rejected by diffusers>=0.41.0 and used to fail
+    the whole load after the download had finished."""
+
+    fake_config = _fake_quant_modules(monkeypatch)
+
+    engine = DiffusersEngine(stub_settings(engine="diffusers", quant=quant))
+    config = engine._quantization_config(types.SimpleNamespace())
+
+    assert isinstance(config, fake_config)
+    # Only the two components that dominate the footprint are quantised.
+    assert set(config.quant_mapping) == {"transformer", "text_encoder"}
+    assert config.quant_mapping["transformer"].kwargs == {"weights_dtype": quant}
+    assert config.quant_mapping["text_encoder"].kwargs == {"weights": quant}
+
+
+def test_quantisation_without_the_stack_fails_with_an_actionable_message(monkeypatch):
+    monkeypatch.setitem(sys.modules, "diffusers.quantizers", None)
+
+    engine = DiffusersEngine(stub_settings(engine="diffusers", quant="int8"))
+
+    with pytest.raises(EngineError) as excinfo:
+        engine._quantization_config(types.SimpleNamespace())
+
+    assert "optimum-quanto" in str(excinfo.value)
+
+
 def test_load_settings_round_trip_is_used_by_the_engine(monkeypatch):
     monkeypatch.setenv("IMAGEINT_IMAGE_ENGINE", "stub")
     settings = load_settings()

@@ -338,6 +338,31 @@ Kaltstart ohne Admin-Oberfläche:
 Die Docker-Healthchecks akzeptieren deshalb **200 oder 503**: ein Container, der
 gerade 33 GB lädt, ist gesund, und Docker soll ihn nicht neu starten.
 
+### Wenn der Ladevorgang scheitert
+
+Scheitert der Ladevorgang, antwortet der Modellserver auf `GET /health` mit
+**500** und legt den Grund in das Feld `message`. Der Gateway reicht diesen Text
+unverändert weiter — er steht damit in `docker compose logs gateway` und in
+`GET /v1/health` bzw. `GET /v1/models`:
+
+```text
+Modellserver meldet HTTP 500. RuntimeError: [enforce fail at alloc_cpu.cpp:121] DefaultCPUAllocator: can't allocate memory
+```
+
+Der Zustand bleibt `error`, bis der Container neu startet; eine wiederholte
+Anfrage hilft nicht. Der vollständige Traceback steht im Log des Modellservers:
+
+```bash
+docker compose logs image --tail=200
+docker compose restart image
+```
+
+Die häufigsten Ursachen sind ein zu kleines `mem_limit` (bf16 braucht ~33 GB,
+siehe Speicherbudget oben) und `IMAGEINT_IMAGE_QUANT=int8|int4` auf einem
+`diffusers`, das die Quantisierungskonfiguration anders erwartet — int8/int4
+brauchen `diffusers>=0.41.0` und `optimum-quanto`, beides steht in
+`image_server/requirements.txt`.
+
 Mit `IMAGEINT_IMAGE_PRELOAD=false` lädt das Bildmodell erst beim ersten Auftrag.
 Damit die dokumentierte Empfehlung „später erneut" dann nicht ins Leere läuft,
 ruft der Gateway den Bildserver über `POST /v1/warmup` an, sobald er ihn im

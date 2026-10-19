@@ -55,6 +55,33 @@ async def test_health_reports_an_unconfigured_server():
     assert result["ok"] is False
 
 
+async def test_health_reports_the_reason_a_server_failed(fake):
+    """A model server that could not load its weights explains why in the body;
+    that reason must not be dropped in favour of the bare status code."""
+
+    fake.health_status["image"] = 500
+    fake.health_bodies["image"] = {
+        "ok": False,
+        "state": "error",
+        "message": "ValueError: `quantization_config` must be an instance of "
+        "`PipelineQuantizationConfig`.",
+    }
+
+    result = await vllm.health(IMAGE_URL, "", "Qwen/Qwen-Image-2.1")
+
+    assert result["ok"] is False
+    assert result["loading"] is False
+    assert result["http"] == 500
+    assert "HTTP 500" in result["message"]
+    assert "PipelineQuantizationConfig" in result["message"]
+
+
+async def test_health_reports_a_failed_server_without_a_body(fake):
+    fake.health_status["image"] = 500
+    result = await vllm.health(IMAGE_URL, "", "Qwen/Qwen-Image-2.1")
+    assert result["message"] == "Modellserver meldet HTTP 500."
+
+
 # -- download progress ------------------------------------------------------ #
 
 PROGRESS = {
