@@ -138,6 +138,49 @@ environment:
 Das Token wird als `X-Auth-Token` gesendet — dieselbe Kopfzeile wie bei
 SpeechInt.
 
+### Ladefortschritt (`components[*].progress`)
+
+Ein Kaltstart lädt mehrere Dutzend Gigabyte. ImageInt meldet deshalb, wie weit
+der Download ist, damit die Admin-Karte einen **bestimmten** Balken statt eines
+unbestimmten zeigen kann. Die Quelle ist `GET /v1/health` (oder `/v1/ready`):
+
+```json
+"components": {
+  "enhancer": {"state": "ready", "ready": true},
+  "image": {
+    "state": "loading", "ready": false,
+    "progress": {
+      "known": true,
+      "percent": 42.5,
+      "bytes_downloaded": 123456789,
+      "bytes_total": 296352743424,
+      "files_downloaded": 3,
+      "files_total": 12,
+      "current_file": "diffusion_pytorch_model-00002-of-00004.safetensors",
+      "eta_seconds": 120
+    }
+  }
+}
+```
+
+Regeln für die Anzeige:
+
+| Fall | `progress` | Balken |
+|---|---|---|
+| lädt, Gesamtgröße bekannt | `known: true`, `percent` 0–100 | bestimmt, `percent` |
+| lädt, Gesamtgröße unbekannt (kein Netz zum Hub) | `known: false`, nur `bytes_downloaded` | unbestimmt, Text „X MB" |
+| fertig (`state == "ready"`) | `known: true`, `percent: 100.0` | voll |
+| idle, Fehler, alles im Cache | fehlt ganz | unbestimmt |
+
+„X von Y MB" ergibt sich aus `bytes_downloaded` / `bytes_total`; beide sind
+Bytes, die Anzeige teilt durch 1024². `percent` ist bereits gerundet und kann
+direkt in die Breite des Balkens wandern. Die Werte werden im Takt von
+`IMAGEINT_HEALTH_CACHE_SECONDS` (Standard 5 s) aktualisiert — häufiger zu pollen
+bringt nichts.
+
+`progress` ist **kein Pflichtfeld**: Ein Client, der es nicht kennt, verhält
+sich wie bisher, und ein älterer ImageInt-Stand liefert es einfach nicht.
+
 ---
 
 ## 3. Tool-Definition

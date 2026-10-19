@@ -88,6 +88,41 @@ def test_models_reports_both_components(client):
     assert body["quant"] == "none"
 
 
+def test_health_reports_the_download_progress_of_a_component(client, fake):
+    fake.health_status[IMAGE_HOST] = 503
+    fake.health_bodies[IMAGE_HOST] = {
+        "state": "loading",
+        "progress": {
+            "known": True,
+            "percent": 42.5,
+            "bytes_downloaded": 123456789,
+            "bytes_total": 296352743424,
+            "files_downloaded": 3,
+            "files_total": 12,
+            "current_file": "diffusion_pytorch_model-00002-of-00004.safetensors",
+            "eta_seconds": 120,
+        },
+    }
+
+    body = client.get("/v1/health").json()
+
+    progress = body["components"]["image"]["progress"]
+    assert progress["known"] is True
+    assert progress["percent"] == 42.5
+    assert progress["bytes_downloaded"] == 123456789
+    assert progress["bytes_total"] == 296352743424
+    assert progress["files_downloaded"] == 3
+    assert progress["files_total"] == 12
+    assert progress["current_file"].endswith(".safetensors")
+    assert progress["eta_seconds"] == 120
+
+
+def test_health_omits_the_progress_while_nothing_downloads(client):
+    body = client.get("/v1/health").json()
+    assert "progress" not in body["components"]["enhancer"]
+    assert "progress" not in body["components"]["image"]
+
+
 # --------------------------------------------------------------------------- #
 # Authentication
 # --------------------------------------------------------------------------- #

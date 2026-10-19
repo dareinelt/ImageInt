@@ -69,6 +69,10 @@ class FakeVllm:
     def __init__(self) -> None:
         #: HTTP status of ``GET /health`` per host. 503 means "still loading".
         self.health_status = {ENHANCER_HOST: 200, IMAGE_HOST: 200}
+        #: Optional JSON body of ``GET /health`` per host. The model servers
+        #: report their engine status -- including a download ``progress``
+        #: object -- there; without an entry the body stays empty.
+        self.health_bodies: dict = {}
         #: Answer of the enhancer, split into the fields vLLM would report.
         self.enhancer_reasoning = "The user wants a picture of a red panda. Ratio 3:2."
         self.enhancer_answer = json.dumps(ENHANCER_ANSWER, ensure_ascii=False)
@@ -177,9 +181,10 @@ class FakeVllm:
 
         if path == "/health":
             status = self.health_status.get(host, 200)
-            if status == 200:
-                return httpx.Response(200, content=b"")
-            return httpx.Response(status, content=b"")
+            body = self.health_bodies.get(host)
+            if body is None:
+                return httpx.Response(status, content=b"")
+            return httpx.Response(status, json=body)
 
         if path == "/v1/warmup":
             self.warmups.append(host)

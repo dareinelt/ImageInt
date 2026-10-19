@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from .config import Settings
+from .progress import DownloadProgress
 
 log = logging.getLogger("imageint.image.engine")
 
@@ -73,6 +74,12 @@ class BaseEngine:
         self._load_seconds = 0.0
         self._loaded_at = 0.0
         self._thread: Optional[threading.Thread] = None
+        self._progress: Optional[DownloadProgress] = self._make_progress()
+
+    def _make_progress(self) -> Optional[DownloadProgress]:
+        """The download tracker for this engine, or ``None`` when it downloads nothing."""
+
+        return None
 
     # -- lifecycle --------------------------------------------------------- #
 
@@ -107,13 +114,19 @@ class BaseEngine:
             self._error = ""
             started = time.monotonic()
             log.info("[image] loading %s on %s", self.settings.model, self.settings.device)
+            if self._progress is not None:
+                self._progress.start()
             try:
                 self._load()
             except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+                if self._progress is not None:
+                    self._progress.stop()
                 self._state = "error"
                 self._error = f"{type(exc).__name__}: {exc}"
                 log.exception("[image] loading %s failed", self.settings.model)
                 return
+            if self._progress is not None:
+                self._progress.finish()
             self._load_seconds = time.monotonic() - started
             self._loaded_at = time.time()
             self._state = "ready"
@@ -141,13 +154,15 @@ class BaseEngine:
     def close(self) -> None:
         """Release whatever the engine holds. Called on application shutdown."""
 
+        if self._progress is not None:
+            self._progress.stop()
         self._state = "idle"
         self._error = ""
 
     # -- reporting --------------------------------------------------------- #
 
     def status(self) -> dict:
-        return {
+        status = {
             "engine": self.name,
             "model": self.settings.model,
             "device": self.settings.device,
@@ -160,6 +175,10 @@ class BaseEngine:
             "load_seconds": round(self._load_seconds, 1),
             "loaded_at": self._loaded_at,
         }
+        progress = self._progress.snapshot() if self._progress is not None else {}
+        if progress:
+            status["progress"] = progress
+        return status
 
     # -- helpers ----------------------------------------------------------- #
 
@@ -177,6 +196,13 @@ class DiffusersEngine(BaseEngine):
     def __init__(self, settings: Settings) -> None:
         super().__init__(settings)
         self._pipe = None
+
+    def _make_progress(self) -> Optional[DownloadProgress]:
+        return DownloadProgress(
+            self.settings.model,
+            cache_dir=self.settings.cache_dir,
+            revision=self.settings.revision,
+        )
 
     def _torch(self):
         try:

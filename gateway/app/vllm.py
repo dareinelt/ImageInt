@@ -57,6 +57,62 @@ def _upstream_message(decoded: Any) -> str:
     return str(decoded.get("message") or "")
 
 
+#: Numeric ``progress`` fields the model servers may report, with the type they
+#: are normalised to before they reach ``/v1/health``.
+_PROGRESS_COUNTS = (
+    "bytes_downloaded",
+    "bytes_total",
+    "files_downloaded",
+    "files_total",
+    "eta_seconds",
+)
+
+
+def _clean_progress(raw: Any) -> dict:
+    """Validate and normalise a ``progress`` object from a model server.
+
+    The model servers merge their engine status into ``/health``, so a download
+    in flight appears there as ``progress``. Anything unexpected -- vLLM's plain
+    ``{"status": "ok"}``, an empty body, an older server -- yields ``{}`` so the
+    caller omits the key and the UI keeps its indeterminate bar.
+    """
+
+    if not isinstance(raw, dict) or not raw:
+        return {}
+
+    progress: dict[str, Any] = {"known": bool(raw.get("known"))}
+
+    percent = raw.get("percent")
+    if isinstance(percent, (int, float)) and not isinstance(percent, bool):
+        progress["percent"] = round(min(100.0, max(0.0, float(percent))), 1)
+
+    for key in _PROGRESS_COUNTS:
+        value = raw.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            progress[key] = int(value)
+
+    current = raw.get("current_file")
+    if isinstance(current, str) and current:
+        progress["current_file"] = current
+
+    # Without a percentage or a byte count there is nothing to draw.
+    if "percent" not in progress and "bytes_downloaded" not in progress:
+        return {}
+    return progress
+
+
+def _health_progress(response: httpx.Response) -> dict:
+    """The ``progress`` object of a ``/health`` response, or ``{}``."""
+
+    try:
+        decoded = response.json()
+    except ValueError:
+        return {}
+    if not isinstance(decoded, dict):
+        return {}
+    return _clean_progress(decoded.get("progress"))
+
+
 async def health(url: str, token: str, model: str, *, timeout: float = 10.0) -> dict:
     """Probe one vLLM server through its ``/health`` endpoint.
 
@@ -64,6 +120,9 @@ async def health(url: str, token: str, model: str, *, timeout: float = 10.0) -> 
     building the model, which is exactly the distinction the loading contract
     needs. A closed port stays indistinguishable from a slow first start here;
     :mod:`app.health` turns that into the ``starting`` state.
+
+    The body is read as well: ImageInt's own model servers report download
+    progress there, which ``/v1/health`` forwards to the admin UI.
     """
 
     if not url:
@@ -98,23 +157,31 @@ async def health(url: str, token: str, model: str, *, timeout: float = 10.0) -> 
             "message": f"Modellserver nicht erreichbar: {exc}",
         }
 
+    progress = _health_progress(response)
+
     if response.status_code == 200:
-        return {
+        payload = {
             **result,
             "ok": True,
             "loading": False,
             "http": 200,
             "message": "Modellserver erreichbar.",
         }
+        if progress:
+            payload["progress"] = progress
+        return payload
 
     if response.status_code == 503:
-        return {
+        payload = {
             **result,
             "ok": False,
             "loading": True,
             "http": 503,
             "message": "Modellserver lädt das Modell noch (HTTP 503).",
         }
+        if progress:
+            payload["progress"] = progress
+        return payload
 
     return {
         **result,

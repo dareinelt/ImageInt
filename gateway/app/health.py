@@ -123,6 +123,13 @@ class HealthMonitor:
         if state == READY:
             self._ever_ready[component] = True
 
+        # The model servers report download progress in their health body; the
+        # admin UI draws a determinate bar from it. Omitted while nothing is
+        # downloading, which is what keeps the bar indeterminate there.
+        progress = result.get("progress")
+        if progress:
+            payload["progress"] = progress
+
         self._cache[component] = payload
         self._cache_at[component] = now
         return payload

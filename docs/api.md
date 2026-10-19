@@ -108,6 +108,52 @@ Bereitschaft, **unauthentifiziert**. Der Endpunkt, den ein Client pollen soll.
 Wie `/v1/ready`, aber mit Token. Praktisch für das Admin-Formular in LLMInt,
 das den Token ohnehin hat.
 
+### Downloadfortschritt in `components[*].progress`
+
+Lädt ein Modellserver gerade Gewichte aus dem HuggingFace-Cache, hängt er an
+seine `/health`-Antwort ein `progress`-Objekt; der Gateway reicht es unverändert
+in `components.enhancer.progress` bzw. `components.image.progress` durch — in
+`/v1/ready` wie in `/v1/health`.
+
+```json
+"components": {
+  "image": {
+    "state": "loading", "ready": false, "url": "http://image:8000",
+    "progress": {
+      "known": true,
+      "percent": 42.5,
+      "bytes_downloaded": 123456789,
+      "bytes_total": 296352743424,
+      "files_downloaded": 3,
+      "files_total": 12,
+      "current_file": "diffusion_pytorch_model-00002-of-00004.safetensors",
+      "eta_seconds": 120
+    }
+  }
+}
+```
+
+| Feld | Bedeutung |
+|---|---|
+| `known` | `true`, wenn `percent` belastbar ist (Gesamtgröße bekannt) |
+| `percent` | 0–100, eine Nachkommastelle; `100.0`, sobald das Laden fertig ist |
+| `bytes_downloaded` / `bytes_total` | Bytes im Cache bzw. Gesamtgröße des Repos |
+| `files_downloaded` / `files_total` | fertige Blobs bzw. Dateien im Repo |
+| `current_file` | Dateiname, die zuletzt gewachsen ist |
+| `eta_seconds` | Restzeit aus dem gleitenden Mittel der Rate; `0` bei fertig |
+
+Alle Felder außer `known`/`percent` sind optional. Nach einem erfolgreichen
+Laden meldet der Server dauerhaft `known: true`, `percent: 100.0` und
+`eta_seconds: 0`. **Fehlt `progress` ganz, ist gerade nichts herunterzuladen** —
+idle, nach einem Fehler oder weil der Server den Fortschritt nicht kennt. Ein
+Client soll dann einen unbestimmten Balken zeigen; `known: false` bedeutet
+dagegen „es lädt, aber die Gesamtgröße ist unbekannt" (kein Netz zum Hub,
+privates Repo), dann ist nur `bytes_downloaded` gefüllt.
+
+Die Werte stammen aus einem Poll des Blob-Verzeichnisses im Sekundentakt und
+werden mit dem übrigen Health-Ergebnis für `IMAGEINT_HEALTH_CACHE_SECONDS`
+gecacht; sie aktualisieren sich also höchstens in diesem Takt.
+
 ### `GET /v1/config`
 
 Die wirksame Konfiguration. Tokens werden maskiert ausgegeben.
@@ -496,6 +542,24 @@ Unterschiede zum Gateway, die man kennen muss:
   `1.0` (dem dokumentierten Standard) wird ohne Guidance gesampelt, und ein
   Negativ-Prompt hätte dann keine Wirkung.
 - **Kein Streaming.** `stream` in der Anfrage wird ignoriert.
+
+### `GET /health`
+
+`200` bereit, `503` lädt noch, `500` fehlgeschlagen. Der Body ist der
+`status()`-Dict der Engine, und während eines Downloads enthält er zusätzlich
+das oben beschriebene `progress`-Objekt:
+
+```json
+{"ok": false, "status": "loading", "message": "Das Bildmodell wird noch geladen.",
+ "engine": "diffusers", "model": "Qwen/Qwen-Image-2.1", "device": "cpu",
+ "dtype": "bfloat16", "quant": "none", "state": "loading", "loaded": false,
+ "loading": true, "error": null, "load_seconds": 0.0, "loaded_at": null,
+ "progress": {"known": true, "percent": 42.5, "bytes_downloaded": 123456789,
+              "bytes_total": 296352743424, "eta_seconds": 120}}
+```
+
+Der Enhancerserver antwortet auf `/health` mit demselben Aufbau und demselben
+`progress`-Objekt.
 
 ### `POST /v1/warmup`
 

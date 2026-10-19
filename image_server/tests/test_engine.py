@@ -129,6 +129,87 @@ def test_status_reports_the_configured_engine_knobs():
     assert status["device"] == "cuda"
 
 
+# --------------------------------------------------------------------------- #
+# Download progress
+# --------------------------------------------------------------------------- #
+class RecordingProgress:
+    """Stand-in for the tracker, so the wiring needs no download."""
+
+    def __init__(self, payload: dict | None = None) -> None:
+        self.payload = payload or {}
+        self.started = 0
+        self.stopped = 0
+        self.finished = 0
+
+    def start(self) -> None:
+        self.started += 1
+
+    def stop(self) -> None:
+        self.stopped += 1
+
+    def finish(self) -> None:
+        self.finished += 1
+
+    def snapshot(self) -> dict:
+        return self.payload
+
+
+def test_a_stub_engine_tracks_no_download():
+    assert StubEngine(stub_settings())._progress is None
+
+
+def test_a_diffusers_engine_tracks_its_checkpoint_download():
+    engine = DiffusersEngine(Settings(engine="diffusers", model="Qwen/Qwen-Image-2.1"))
+    assert engine._progress is not None
+    assert engine._progress.repo_id == "Qwen/Qwen-Image-2.1"
+
+
+def test_status_omits_the_progress_while_nothing_downloads():
+    assert "progress" not in StubEngine(stub_settings()).status()
+
+
+def test_status_carries_the_download_progress():
+    engine = StubEngine(stub_settings())
+    engine._progress = RecordingProgress({"known": True, "percent": 42.5})
+    engine._state = "loading"
+
+    assert engine.status()["progress"]["percent"] == 42.5
+
+
+def test_a_successful_load_starts_and_finishes_the_tracker():
+    engine = StubEngine(stub_settings())
+    progress = RecordingProgress()
+    engine._progress = progress
+
+    engine.ensure_loaded()
+
+    assert progress.started == 1
+    assert progress.finished == 1
+    assert progress.stopped == 0
+
+
+def test_a_failed_load_stops_the_tracker():
+    engine = FailingEngine(stub_settings())
+    progress = RecordingProgress()
+    engine._progress = progress
+
+    engine.ensure_loaded()
+
+    assert progress.started == 1
+    assert progress.stopped == 1
+    assert progress.finished == 0
+
+
+def test_close_stops_the_tracker():
+    engine = StubEngine(stub_settings())
+    progress = RecordingProgress()
+    engine._progress = progress
+
+    engine.close()
+
+    assert progress.stopped == 1
+
+
 def test_close_resets_the_engine():
     stub = StubEngine(stub_settings())
     stub.ensure_loaded()

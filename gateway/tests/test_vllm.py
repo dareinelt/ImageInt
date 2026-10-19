@@ -55,6 +55,65 @@ async def test_health_reports_an_unconfigured_server():
     assert result["ok"] is False
 
 
+# -- download progress ------------------------------------------------------ #
+
+PROGRESS = {
+    "known": True,
+    "percent": 42.5,
+    "bytes_downloaded": 123456789,
+    "bytes_total": 296352743424,
+    "files_downloaded": 3,
+    "files_total": 12,
+    "current_file": "diffusion_pytorch_model-00002-of-00004.safetensors",
+    "eta_seconds": 120,
+}
+
+
+async def test_health_forwards_the_download_progress(fake):
+    fake.health_status["image"] = 503
+    fake.health_bodies["image"] = {"ok": False, "state": "loading", "progress": PROGRESS}
+
+    result = await vllm.health(IMAGE_URL, "", "Qwen/Qwen-Image-2.1")
+
+    assert result["loading"] is True
+    assert result["progress"]["percent"] == 42.5
+    assert result["progress"]["bytes_total"] == 296352743424
+    assert result["progress"]["current_file"] == PROGRESS["current_file"]
+    assert result["progress"]["eta_seconds"] == 120
+
+
+async def test_health_forwards_the_progress_of_a_ready_server(fake):
+    fake.health_bodies["image"] = {"state": "ready", "progress": {"known": True, "percent": 100}}
+
+    result = await vllm.health(IMAGE_URL, "", "Qwen/Qwen-Image-2.1")
+
+    assert result["ok"] is True
+    assert result["progress"] == {"known": True, "percent": 100.0}
+
+
+async def test_health_omits_the_progress_when_the_server_reports_none(fake):
+    fake.health_bodies["image"] = {"state": "ready"}
+    result = await vllm.health(IMAGE_URL, "", "Qwen/Qwen-Image-2.1")
+    assert "progress" not in result
+
+
+async def test_health_omits_the_progress_of_a_bodyless_server(fake):
+    result = await vllm.health(IMAGE_URL, "", "Qwen/Qwen-Image-2.1")
+    assert "progress" not in result
+
+
+async def test_health_ignores_a_malformed_progress(fake):
+    fake.health_bodies["image"] = {"progress": {"known": True, "percent": "viel"}}
+    result = await vllm.health(IMAGE_URL, "", "Qwen/Qwen-Image-2.1")
+    assert "progress" not in result
+
+
+@pytest.mark.parametrize("percent", [-5, 0, 100, 137.5])
+def test_the_progress_percentage_is_clamped(percent):
+    cleaned = vllm._clean_progress({"known": True, "percent": percent})
+    assert 0.0 <= cleaned["percent"] <= 100.0
+
+
 # -- the image request ------------------------------------------------------ #
 
 

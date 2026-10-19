@@ -87,6 +87,25 @@ class SlowEngine(BaseEngine):
         assert self.release.wait(10) is True
 
 
+class FakeProgress:
+    """A tracker double, so the health payload can be checked without a download."""
+
+    def __init__(self, payload: dict) -> None:
+        self.payload = payload
+
+    def start(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+    def finish(self) -> None:
+        pass
+
+    def snapshot(self) -> dict:
+        return self.payload
+
+
 @contextmanager
 def running(settings_obj: Settings, engine_cls=None):
     """A started app, with the engine optionally replaced by a test double."""
@@ -154,6 +173,33 @@ def test_health_reports_a_loading_engine_as_503():
     assert response.status_code == 503
     assert response.json()["status"] == "loading"
     assert response.json()["ok"] is False
+
+
+def test_health_reports_the_download_progress():
+    with running(settings(preload=False), LoadingEngine) as (app, client):
+        app.state.engine._progress = FakeProgress(
+            {
+                "known": True,
+                "percent": 42.5,
+                "bytes_downloaded": 123456789,
+                "bytes_total": 296352743424,
+                "eta_seconds": 120,
+            }
+        )
+        response = client.get("/health")
+    assert response.status_code == 503
+    body = response.json()
+    assert body["status"] == "loading"
+    assert body["progress"]["percent"] == 42.5
+    assert body["progress"]["bytes_total"] == 296352743424
+
+
+def test_health_omits_the_progress_when_the_tracker_reports_nothing():
+    with running(settings(preload=False), LoadingEngine) as (app, client):
+        app.state.engine._progress = FakeProgress({})
+        response = client.get("/health")
+    assert response.status_code == 503
+    assert "progress" not in response.json()
 
 
 def test_health_reports_a_broken_load_as_500():
