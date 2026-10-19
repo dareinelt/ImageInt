@@ -76,9 +76,9 @@ def _field(value: Any, name: str) -> Any:
 def _blob_keys(name: str) -> tuple[str, ...]:
     """The blob ids a file in ``blobs/`` can belong to.
 
-    ``huggingface_hub`` names a finished blob ``<blob_id>`` and a running
-    download either ``<blob_id>.incomplete`` (older releases, resumed by the
-    next attempt) or ``<blob_id>.<random>.incomplete`` (current releases, one
+    ``huggingface_hub`` names a finished blob ``<etag>`` and a running
+    download either ``<etag>.incomplete`` (older releases, resumed by the
+    next attempt) or ``<etag>.<random>.incomplete`` (current releases, one
     file per process). All of them carry the bytes of the same blob.
     """
 
@@ -209,12 +209,18 @@ class DownloadProgress:
         names: dict[str, str] = {}
         for sibling in getattr(info, "siblings", None) or []:
             filename = _field(sibling, "rfilename")
-            blob_id = _field(sibling, "blob_id")
-            if filename and blob_id:
-                # LFS blobs are stored under their sha256, plain files under
-                # their git blob id -- both are what ``blob_id`` carries, so the
-                # cache file name can be mapped back to a readable file name.
-                names[str(blob_id)] = str(filename)
+            # The cache names a blob after its etag: the LFS sha256 for an LFS
+            # file, the git blob id for a plain one. ``blob_id`` is always the
+            # git OID, and for an LFS file that is the id of the *pointer*, not
+            # of the object in ``blobs/``. Mapping LFS files by ``blob_id``
+            # would drop every weight shard from the scan and leave the bar at
+            # the few kilobytes of the config files.
+            lfs = _field(sibling, "lfs")
+            blob_key = (_field(lfs, "sha256") if lfs else None) or _field(
+                sibling, "blob_id"
+            )
+            if filename and blob_key:
+                names[str(blob_key)] = str(filename)
 
             size = _field(sibling, "size")
             if size is None:
@@ -253,7 +259,7 @@ class DownloadProgress:
             return 0, 0, None
 
         known = self._blob_names
-        # ``blob_id -> [(name, size, complete, mtime)]``. Without a blob map
+        # ``cache blob key -> [(name, size, complete, mtime)]``. Without a map
         # (Hub unreachable, older ``huggingface_hub``) every file stands for
         # itself: there is nothing to filter or deduplicate against.
         per_blob: dict[str, list[tuple[str, int, bool, float]]] = {}
