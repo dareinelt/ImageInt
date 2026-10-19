@@ -16,7 +16,12 @@ Two sources are combined:
     Polled from ``<cache>/models--<org>--<name>/blobs/``. Only ``blobs`` is
     scanned: ``snapshots`` holds symlinks to the very same files, so counting
     both would double the sum. ``.incomplete`` files are counted, because their
-    bytes are already on disk.
+    bytes are already on disk -- but a blob is counted once. ``huggingface_hub``
+    downloads into a process-unique ``<blob>.<random>.incomplete`` file, so every
+    attempt that was killed mid-download leaves its own copy of the same bytes
+    behind; adding them up reported twice the model size. For the same reason
+    only blobs of the requested revision are counted: the cache keeps the blobs
+    of an earlier revision when ``main`` moves on.
 
 Every method swallows its own errors: a broken cache directory must never turn a
 working model load into a failure, and the polling thread never blocks the
@@ -66,6 +71,22 @@ def _field(value: Any, name: str) -> Any:
     if isinstance(value, dict):
         return value.get(name)
     return getattr(value, name, None)
+
+
+def _blob_keys(name: str) -> tuple[str, ...]:
+    """The blob ids a file in ``blobs/`` can belong to.
+
+    ``huggingface_hub`` names a finished blob ``<blob_id>`` and a running
+    download either ``<blob_id>.incomplete`` (older releases, resumed by the
+    next attempt) or ``<blob_id>.<random>.incomplete`` (current releases, one
+    file per process). All of them carry the bytes of the same blob.
+    """
+
+    if not name.endswith(".incomplete"):
+        return (name,)
+    stem = name[: -len(".incomplete")]
+    base, dot, _ = stem.rpartition(".")
+    return (stem, base) if dot else (stem,)
 
 
 class DownloadProgress:
@@ -220,16 +241,22 @@ class DownloadProgress:
         return Path(root) / ("models--" + self.repo_id.replace("/", "--")) / "blobs"
 
     def _scan(self) -> tuple[int, int, Optional[str]]:
-        """Return ``(bytes_on_disk, complete_files, most_recent_blob)``."""
+        """Return ``(bytes_on_disk, complete_files, newest_file_name)``.
 
-        total = 0
-        complete = 0
-        newest_name: Optional[str] = None
-        newest_mtime = -1.0
+        Only blobs the Hub listed for the requested revision are counted, and a
+        blob is counted once no matter how many attempts left files behind.
+        """
+
         try:
             entries = list(os.scandir(self._blobs_dir()))
         except OSError:
             return 0, 0, None
+
+        known = self._blob_names
+        # ``blob_id -> [(name, size, complete, mtime)]``. Without a blob map
+        # (Hub unreachable, older ``huggingface_hub``) every file stands for
+        # itself: there is nothing to filter or deduplicate against.
+        per_blob: dict[str, list[tuple[str, int, bool, float]]] = {}
 
         for entry in entries:
             try:
@@ -243,12 +270,35 @@ class DownloadProgress:
             if name.endswith(".lock"):
                 continue
 
-            total += stat.st_size
-            if not name.endswith(".incomplete"):
+            key = name
+            if known:
+                key = next((k for k in _blob_keys(name) if k in known), "")
+                if not key:
+                    # A blob of another revision or of a repository that no
+                    # longer matches the configured one. It is on disk, but it
+                    # is not part of this download.
+                    continue
+
+            per_blob.setdefault(key, []).append(
+                (name, stat.st_size, not name.endswith(".incomplete"), stat.st_mtime)
+            )
+
+        total = 0
+        complete = 0
+        newest_name: Optional[str] = None
+        newest_mtime = -1.0
+
+        for key, files in per_blob.items():
+            # The finished blob and the temp files of interrupted attempts hold
+            # the same bytes, so the largest file is the current state.
+            total += max(item[1] for item in files)
+            if any(item[2] for item in files):
                 complete += 1
-            if stat.st_mtime >= newest_mtime:
-                newest_mtime = stat.st_mtime
-                newest_name = name
+
+            name, _, _, mtime = max(files, key=lambda item: item[3])
+            if mtime >= newest_mtime:
+                newest_mtime = mtime
+                newest_name = known.get(key, key) if known else name
 
         return total, complete, newest_name
 

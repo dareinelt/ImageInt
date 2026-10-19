@@ -114,7 +114,7 @@ def test_a_failing_hub_call_only_costs_the_total(tmp_path):
 def test_the_percentage_is_the_share_of_the_total_on_disk(tmp_path):
     directory = blobs_dir(tmp_path)
     write_blob(directory, "abc", 100)
-    tracker = tracker_for(tmp_path, FakeApi([sibling("a.bin", 400)]))
+    tracker = tracker_for(tmp_path, FakeApi([sibling("a.bin", 400, blob_id="abc")]))
 
     tracker._read_model_info()
     tracker._sample()
@@ -131,7 +131,7 @@ def test_the_percentage_is_the_share_of_the_total_on_disk(tmp_path):
 def test_an_incomplete_file_counts_with_its_bytes(tmp_path):
     directory = blobs_dir(tmp_path)
     write_blob(directory, "abc.incomplete", 50)
-    tracker = tracker_for(tmp_path, FakeApi([sibling("a.bin", 100)]))
+    tracker = tracker_for(tmp_path, FakeApi([sibling("a.bin", 100, blob_id="abc")]))
 
     tracker._read_model_info()
     tracker._sample()
@@ -159,7 +159,8 @@ def test_only_blobs_are_counted_not_the_snapshots(tmp_path):
     snapshot_dir = tmp_path / FOLDER / "snapshots" / "abcdef"
     snapshot_dir.mkdir(parents=True)
     write_blob(snapshot_dir, "model.safetensors", 900)
-    tracker = tracker_for(tmp_path, FakeApi([sibling("model.safetensors", 100)]))
+    api = FakeApi([sibling("model.safetensors", 100, blob_id="abc")])
+    tracker = tracker_for(tmp_path, api)
 
     tracker._read_model_info()
     tracker._sample()
@@ -173,13 +174,70 @@ def test_symlinked_blobs_are_not_counted_twice(tmp_path):
     try:
         (directory / "link").symlink_to(directory / "abc")
     except (OSError, NotImplementedError):
-        pytest.skip("Symlinks sind auf diesem System nicht verfÃ¼gbar.")
+        pytest.skip("Symlinks sind auf diesem System nicht verfügbar.")
 
     tracker = tracker_for(tmp_path, FakeApi([sibling("a.bin", 100)]))
     tracker._read_model_info()
     tracker._sample()
 
     assert tracker.snapshot()["bytes_downloaded"] == 100
+
+
+def test_a_blob_counts_once_although_an_attempt_was_interrupted(tmp_path):
+    directory = blobs_dir(tmp_path)
+    write_blob(directory, "abc", 100)
+    write_blob(directory, "abc.1a2b3c4d.incomplete", 100)
+    tracker = tracker_for(tmp_path, FakeApi([sibling("a.bin", 100, blob_id="abc")]))
+
+    tracker._read_model_info()
+    tracker._sample()
+
+    snapshot = tracker.snapshot()
+    assert snapshot["bytes_downloaded"] == 100
+    assert snapshot["files_downloaded"] == 1
+    assert snapshot["percent"] == 100.0
+
+
+def test_leftovers_of_several_attempts_do_not_add_up(tmp_path):
+    directory = blobs_dir(tmp_path)
+    write_blob(directory, "abc.1a2b3c4d.incomplete", 40)
+    write_blob(directory, "abc.5e6f7a8b.incomplete", 60)
+    tracker = tracker_for(tmp_path, FakeApi([sibling("a.bin", 100, blob_id="abc")]))
+
+    tracker._read_model_info()
+    tracker._sample()
+
+    # Two attempts, each holding part of the same file: counted once, with the
+    # furthest attempt winning.
+    snapshot = tracker.snapshot()
+    assert snapshot["bytes_downloaded"] == 60
+    assert snapshot["files_downloaded"] == 0
+
+
+def test_blobs_of_another_revision_are_not_counted(tmp_path):
+    directory = blobs_dir(tmp_path)
+    write_blob(directory, "abc", 100)
+    write_blob(directory, "def", 900)
+    tracker = tracker_for(tmp_path, FakeApi([sibling("a.bin", 100, blob_id="abc")]))
+
+    tracker._read_model_info()
+    tracker._sample()
+
+    snapshot = tracker.snapshot()
+    assert snapshot["bytes_downloaded"] == 100
+    assert snapshot["percent"] == 100.0
+
+
+def test_a_temp_file_still_names_its_readable_file(tmp_path):
+    directory = blobs_dir(tmp_path)
+    write_blob(directory, "deadbeef.1a2b3c4d.incomplete", 10)
+    api = FakeApi([sibling("model.safetensors", 10, blob_id="deadbeef")])
+    tracker = tracker_for(tmp_path, api)
+
+    tracker._read_model_info()
+    tracker._sample()
+
+    assert tracker.snapshot()["current_file"] == "model.safetensors"
 
 
 def test_a_missing_cache_directory_is_not_an_error(tmp_path):
@@ -218,7 +276,7 @@ def test_the_eta_follows_the_measured_rate(tmp_path):
     directory = blobs_dir(tmp_path)
     now = [0.0]
     tracker = tracker_for(
-        tmp_path, FakeApi([sibling("a.bin", 400)]), clock=lambda: now[0]
+        tmp_path, FakeApi([sibling("a.bin", 400, blob_id="abc")]), clock=lambda: now[0]
     )
     tracker._read_model_info()
 
@@ -235,7 +293,7 @@ def test_the_rate_is_reported_in_bytes_per_second(tmp_path):
     directory = blobs_dir(tmp_path)
     now = [0.0]
     tracker = tracker_for(
-        tmp_path, FakeApi([sibling("a.bin", 400)]), clock=lambda: now[0]
+        tmp_path, FakeApi([sibling("a.bin", 400, blob_id="abc")]), clock=lambda: now[0]
     )
     tracker._read_model_info()
 
@@ -270,7 +328,7 @@ def test_a_shrinking_cache_does_not_report_a_negative_rate(tmp_path):
     directory = blobs_dir(tmp_path)
     now = [0.0]
     tracker = tracker_for(
-        tmp_path, FakeApi([sibling("a.bin", 400)]), clock=lambda: now[0]
+        tmp_path, FakeApi([sibling("a.bin", 400, blob_id="abc")]), clock=lambda: now[0]
     )
     tracker._read_model_info()
     write_blob(directory, "abc", 200)
@@ -323,8 +381,9 @@ def test_the_snapshot_stays_json_serialisable(tmp_path):
 
     directory = blobs_dir(tmp_path)
     write_blob(directory, "abc", 100)
-    tracker = tracker_for(tmp_path, FakeApi([sibling("a.bin", 400)]))
+    tracker = tracker_for(tmp_path, FakeApi([sibling("a.bin", 400, blob_id="abc")]))
     tracker._read_model_info()
     tracker._sample()
 
     assert json.loads(json.dumps(tracker.snapshot()))["percent"] == 25.0
+
