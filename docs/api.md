@@ -143,7 +143,7 @@ in `components.enhancer.progress` bzw. `components.image.progress` durch — in
 |---|---|
 | `known` | `true`, wenn `percent` belastbar ist (Gesamtgröße bekannt) |
 | `percent` | 0–100, eine Nachkommastelle; `100.0`, sobald das Laden fertig ist |
-| `bytes_downloaded` / `bytes_total` | Bytes im Cache bzw. Gesamtgröße des Repos |
+| `bytes_downloaded` / `bytes_total` | Bytes des Downloads bzw. Gesamtgröße des Repos |
 | `files_downloaded` / `files_total` | fertige Blobs bzw. Dateien im Repo |
 | `current_file` | Dateiname, die zuletzt gewachsen ist |
 | `eta_seconds` | Restzeit aus dem gleitenden Mittel der Rate; `0` bei fertig |
@@ -160,9 +160,11 @@ unbekannt" (kein Netz zum Hub, privates Repo), dann sind nur
 
 Die Werte stammen aus einem Poll des Blob-Verzeichnisses im Sekundentakt und
 werden mit dem übrigen Health-Ergebnis für `IMAGEINT_HEALTH_CACHE_SECONDS`
-(Standard 5) gecacht. Für eine Live-Anzeige — etwa die Download-Balken mit
-MB/s im LLMInt-Adminbereich — pollt der Client `/v1/ready?fresh=1` bzw.
-`/v1/health?fresh=1` und überspringt damit den Cache.
+(Standard 5) gecacht. Gezählt werden nur die Blobs der angefragten Revision, und
+eine Datei zählt auch dann einmal, wenn ein abgebrochener Versuch eine weitere
+`.incomplete`-Kopie im Cache hinterlassen hat. Für eine Live-Anzeige — etwa die
+Download-Balken mit MB/s im LLMInt-Adminbereich — pollt der Client
+`/v1/ready?fresh=1` bzw. `/v1/health?fresh=1` und überspringt damit den Cache.
 
 Unabhängig von diesem API-Poll schreibt der Gateway den Fortschritt alle
 `IMAGEINT_PROGRESS_LOG_SECONDS` Sekunden (Standard 20, `0` deaktiviert) in sein
