@@ -105,6 +105,9 @@ services:
       IMAGEINT_HEALTH_CACHE_SECONDS: ${IMAGEINT_HEALTH_CACHE_SECONDS:-5}
       IMAGEINT_LOADING_RETRY_AFTER: ${IMAGEINT_LOADING_RETRY_AFTER:-15}
       IMAGEINT_STARTING_GRACE_SECONDS: ${IMAGEINT_STARTING_GRACE_SECONDS:-1800}
+      # How often the gateway writes the download progress of both model
+      # servers to its own log (docker compose logs -f gateway). 0 disables it.
+      IMAGEINT_PROGRESS_LOG_SECONDS: ${IMAGEINT_PROGRESS_LOG_SECONDS:-20}
       # ── Prompt enhancer (Qwen-Image-2.1-PE-T2I) ────────────────────────────
       IMAGEINT_PE_URL: http://enhancer:8000
       # The repository id, because it is also what the enhancer container loads.

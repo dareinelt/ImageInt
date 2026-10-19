@@ -33,11 +33,12 @@ simple client needs no polling at all.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hmac
 import logging
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from functools import partial
 from typing import Any, Optional
 
@@ -46,7 +47,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
-from . import __version__, enhancer as enhancer_module, host, pipeline, ratios
+from . import __version__, enhancer as enhancer_module, host, pipeline, progresslog, ratios
 from .config import IMAGE_ROUTE_PATHS, Settings, get_settings
 from .errors import ImageIntError, bad_request, not_found, payload_too_large, unauthorized
 from .health import COMPONENTS, HealthMonitor
@@ -131,9 +132,20 @@ async def lifespan(app: FastAPI):
         settings.max_jobs,
     )
 
+    progress_task = progresslog.task(_runtime.health, settings.progress_log_seconds)
+    if progress_task is not None:
+        log.info(
+            "Download-Fortschritt der Modellserver wird alle %d s geloggt.",
+            settings.progress_log_seconds,
+        )
+
     try:
         yield
     finally:
+        if progress_task is not None:
+            progress_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await progress_task
         if _runtime is not None:
             await _runtime.registry.shutdown()
             log.info("ImageInt beendet sich.")
@@ -400,6 +412,7 @@ async def config() -> dict:
             "max_jobs": settings.max_jobs,
             "job_retention_seconds": settings.job_retention_seconds,
             "poll_after_seconds": POLL_AFTER,
+            "progress_log_seconds": settings.progress_log_seconds,
         },
         "storage_dir": settings.storage_dir,
         "enhancer": {

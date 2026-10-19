@@ -246,6 +246,8 @@ def environment(monkeypatch, tmp_path):
         # not the state a warm-up produced.
         "IMAGEINT_HEALTH_CACHE_SECONDS": "0",
         "IMAGEINT_STARTING_GRACE_SECONDS": "0",
+        # The progress reporter has its own tests; keep the shared client quiet.
+        "IMAGEINT_PROGRESS_LOG_SECONDS": "0",
         "IMAGEINT_LOADING_RETRY_AFTER": "15",
         "IMAGEINT_LOG_LEVEL": "WARNING",
         "IMAGEINT_HOST_CHECK": "auto",

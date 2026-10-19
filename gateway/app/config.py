@@ -188,6 +188,10 @@ class Settings:
     health_cache_seconds: int = 5
     loading_retry_after: int = 15
     starting_grace_seconds: int = 900
+    #: How often the gateway writes the model servers' download progress to its
+    #: own log, so ``docker compose logs -f gateway`` shows the cold start.
+    #: ``0`` disables the lines.
+    progress_log_seconds: int = 20
     #: How long ``POST /v1/images/generations`` waits for a finished image
     #: before it answers 202 with a job id instead. Long generations on CPU are
     #: the normal case, so the async path is the documented default.
@@ -227,6 +231,7 @@ def load_settings() -> Settings:
         health_cache_seconds=_number("IMAGEINT_HEALTH_CACHE_SECONDS", 5, 0, 300),
         loading_retry_after=_number("IMAGEINT_LOADING_RETRY_AFTER", 15, 1, 3600),
         starting_grace_seconds=_number("IMAGEINT_STARTING_GRACE_SECONDS", 900, 0, 86400),
+        progress_log_seconds=_number("IMAGEINT_PROGRESS_LOG_SECONDS", 20, 0, 86400),
         sync_timeout_seconds=_number("IMAGEINT_SYNC_TIMEOUT", 120, 0, 7200),
         max_concurrent_jobs=_number("IMAGEINT_MAX_CONCURRENT_JOBS", 1, 1, 64),
         max_queued_jobs=_number("IMAGEINT_MAX_QUEUED_JOBS", 2, 0, 1000),
