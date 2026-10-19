@@ -172,8 +172,11 @@ Die Werte stammen aus einem Poll des Blob-Verzeichnisses im Sekundentakt und
 werden mit dem übrigen Health-Ergebnis für `IMAGEINT_HEALTH_CACHE_SECONDS`
 (Standard 5) gecacht. Gezählt werden nur die Blobs der angefragten Revision, und
 eine Datei zählt auch dann einmal, wenn ein abgebrochener Versuch eine weitere
-`.incomplete`-Kopie im Cache hinterlassen hat. Für eine Live-Anzeige — etwa die
-Download-Balken mit MB/s im LLMInt-Adminbereich — pollt der Client
+`.incomplete`-Kopie im Cache hinterlassen hat. LFS-Gewichte werden über ihre
+sha256 erkannt — so heißen die Blobs im Cache; die Git-OID aus den
+Hub-Metadaten gehört nur zur Pointer-Datei und taucht dort nicht auf. Für eine
+Live-Anzeige — etwa die Download-Balken mit MB/s im LLMInt-Adminbereich — pollt
+der Client
 `/v1/ready?fresh=1` bzw. `/v1/health?fresh=1` und überspringt damit den Cache.
 
 Unabhängig von diesem API-Poll schreibt der Gateway den Fortschritt alle

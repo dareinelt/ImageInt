@@ -32,8 +32,16 @@ class FakeApi:
         return types.SimpleNamespace(siblings=self.siblings)
 
 
-def sibling(name: str, size: int | None, blob_id: str | None = None) -> dict:
-    return {"rfilename": name, "size": size, "blob_id": blob_id or name}
+def sibling(
+    name: str,
+    size: int | None,
+    blob_id: str | None = None,
+    lfs: dict | None = None,
+) -> dict:
+    entry = {"rfilename": name, "size": size, "blob_id": blob_id or name}
+    if lfs is not None:
+        entry["lfs"] = lfs
+    return entry
 
 
 def blobs_dir(tmp_path) -> object:
@@ -126,6 +134,41 @@ def test_the_percentage_is_the_share_of_the_total_on_disk(tmp_path):
     assert snapshot["bytes_total"] == 400
     assert snapshot["files_downloaded"] == 1
     assert snapshot["files_total"] == 1
+
+
+def test_an_lfs_file_is_matched_by_its_sha256_not_its_git_oid(tmp_path):
+    directory = blobs_dir(tmp_path)
+    # ``blob_id`` is the git OID of the LFS pointer file; the cache stores the
+    # object itself under the sha256 it points to. Matching by ``blob_id``
+    # silently ignored every weight shard and froze the bar at the config files.
+    write_blob(directory, "a" * 64, 300)
+    write_blob(directory, "b" * 64 + ".1a2b3c4d.incomplete", 100)
+    api = FakeApi(
+        [
+            sibling(
+                "model-00001-of-00002.safetensors",
+                300,
+                blob_id="f" * 40,
+                lfs={"sha256": "a" * 64, "size": 300, "pointerSize": 134},
+            ),
+            sibling(
+                "model-00002-of-00002.safetensors",
+                300,
+                blob_id="e" * 40,
+                lfs={"sha256": "b" * 64, "size": 300, "pointerSize": 134},
+            ),
+        ]
+    )
+    tracker = tracker_for(tmp_path, api)
+
+    tracker._read_model_info()
+    tracker._sample()
+
+    snapshot = tracker.snapshot()
+    assert snapshot["bytes_downloaded"] == 400
+    assert snapshot["percent"] == 66.7
+    assert snapshot["files_downloaded"] == 1
+    assert snapshot["current_file"] == "model-00002-of-00002.safetensors"
 
 
 def test_an_incomplete_file_counts_with_its_bytes(tmp_path):
