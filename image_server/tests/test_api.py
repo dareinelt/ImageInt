@@ -52,6 +52,25 @@ class LoadingEngine(BaseEngine):
         pass
 
 
+class FakeProgress:
+    """A tracker double, so the health payload can be checked without a download."""
+
+    def __init__(self, payload: dict) -> None:
+        self.payload = payload
+
+    def start(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+    def finish(self) -> None:
+        pass
+
+    def snapshot(self) -> dict:
+        return self.payload
+
+
 @pytest.fixture
 def client():
     app = create_app(settings())
@@ -103,6 +122,35 @@ def test_health_is_500_when_the_model_could_not_be_loaded():
     body = response.json()
     assert body["status"] == "error"
     assert "Speicher" in body["message"]
+
+
+def test_health_reports_the_download_progress():
+    app = create_app(settings(preload=False))
+    app.state.engine._progress = FakeProgress(
+        {
+            "known": True,
+            "percent": 42.5,
+            "bytes_downloaded": 123456789,
+            "bytes_total": 296352743424,
+            "eta_seconds": 120,
+        }
+    )
+    with TestClient(app) as client:
+        response = client.get("/health")
+    assert response.status_code == 503
+    body = response.json()
+    assert body["status"] == "loading"
+    assert body["progress"]["percent"] == 42.5
+    assert body["progress"]["bytes_total"] == 296352743424
+
+
+def test_health_omits_the_progress_when_the_tracker_reports_nothing():
+    app = create_app(settings(preload=False))
+    app.state.engine._progress = FakeProgress({})
+    with TestClient(app) as client:
+        response = client.get("/health")
+    assert response.status_code == 503
+    assert "progress" not in response.json()
 
 
 def test_warmup_starts_a_lazy_load_and_answers_at_once():
