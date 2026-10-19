@@ -112,6 +112,7 @@ class DownloadProgress:
         self._files_total: Optional[int] = None
         self._current_file: Optional[str] = None
         self._eta_seconds: Optional[int] = None
+        self._rate_bytes_per_second: Optional[float] = None
         self._percent: Optional[float] = None
         self._samples: deque = deque(maxlen=self.RATE_WINDOW)
         self._blob_names: dict[str, str] = {}
@@ -283,12 +284,18 @@ class DownloadProgress:
             self._samples.clear()
         self._samples.append((now, downloaded))
 
+        self._rate_bytes_per_second = None
         if len(self._samples) < 2:
             return
         first_at, first_bytes = self._samples[0]
         span = now - first_at
         if span <= 0:
             return
+
+        # The rate is reported on its own, so it stays available when the total
+        # size is unknown (offline host, private repo) and the ETA is not.
+        rate = max(0.0, (downloaded - first_bytes) / span)
+        self._rate_bytes_per_second = round(rate, 1)
 
         total = self._bytes_total
         if total is None:
@@ -298,7 +305,6 @@ class DownloadProgress:
         if remaining == 0:
             self._eta_seconds = 0
             return
-        rate = (downloaded - first_bytes) / span
         self._eta_seconds = int(round(remaining / rate)) if rate > 0 else None
 
     def _recompute_locked(self) -> None:
@@ -330,6 +336,7 @@ class DownloadProgress:
                     data["files_downloaded"] = self._files_total
                     data["files_total"] = self._files_total
                 data["eta_seconds"] = 0
+                data["bytes_per_second"] = 0.0
                 return data
 
             if not self._started or self._stopped:
@@ -353,4 +360,6 @@ class DownloadProgress:
                 data["current_file"] = self._current_file
             if self._eta_seconds is not None:
                 data["eta_seconds"] = self._eta_seconds
+            if self._rate_bytes_per_second is not None:
+                data["bytes_per_second"] = self._rate_bytes_per_second
             return data

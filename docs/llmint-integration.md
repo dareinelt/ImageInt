@@ -157,7 +157,8 @@ unbestimmten zeigen kann. Die Quelle ist `GET /v1/health` (oder `/v1/ready`):
       "files_downloaded": 3,
       "files_total": 12,
       "current_file": "diffusion_pytorch_model-00002-of-00004.safetensors",
-      "eta_seconds": 120
+      "eta_seconds": 120,
+      "bytes_per_second": 5242880.0
     }
   }
 }
@@ -168,15 +169,20 @@ Regeln für die Anzeige:
 | Fall | `progress` | Balken |
 |---|---|---|
 | lädt, Gesamtgröße bekannt | `known: true`, `percent` 0–100 | bestimmt, `percent` |
-| lädt, Gesamtgröße unbekannt (kein Netz zum Hub) | `known: false`, nur `bytes_downloaded` | unbestimmt, Text „X MB" |
+| lädt, Gesamtgröße unbekannt (kein Netz zum Hub) | `known: false`, nur `bytes_downloaded`/`bytes_per_second` | unbestimmt, Text „X MB" und „Y MB/s" |
 | fertig (`state == "ready"`) | `known: true`, `percent: 100.0` | voll |
 | idle, Fehler, alles im Cache | fehlt ganz | unbestimmt |
 
 „X von Y MB" ergibt sich aus `bytes_downloaded` / `bytes_total`; beide sind
-Bytes, die Anzeige teilt durch 1024². `percent` ist bereits gerundet und kann
-direkt in die Breite des Balkens wandern. Die Werte werden im Takt von
-`IMAGEINT_HEALTH_CACHE_SECONDS` (Standard 5 s) aktualisiert — häufiger zu pollen
-bringt nichts.
+Bytes, die Anzeige teilt durch 1024². `bytes_per_second` ist die gemessene
+Übertragungsrate desselben gleitenden Fensters (≈ 8 s) und lässt sich direkt als
+„MB/s" anzeigen. `percent` ist bereits gerundet und kann direkt in die Breite des
+Balkens wandern.
+
+Für eine Live-Anzeige pollt der Client `/v1/health?fresh=1` (oder
+`/v1/ready?fresh=1`): der Gateway überspringt dann den Health-Cache und fragt die
+Modellserver sofort neu. Ohne `fresh=1` aktualisieren sich die Werte nur im Takt
+von `IMAGEINT_HEALTH_CACHE_SECONDS` (Standard 5 s).
 
 `progress` ist **kein Pflichtfeld**: Ein Client, der es nicht kennt, verhält
 sich wie bisher, und ein älterer ImageInt-Stand liefert es einfach nicht.

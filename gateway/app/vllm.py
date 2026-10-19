@@ -67,6 +67,10 @@ _PROGRESS_COUNTS = (
     "eta_seconds",
 )
 
+#: ``progress`` fields that are a rate in bytes per second; they are floats and
+#: must survive as such, because the admin UI formats them as MB/s.
+_PROGRESS_RATES = ("bytes_per_second",)
+
 
 def _clean_progress(raw: Any) -> dict:
     """Validate and normalise a ``progress`` object from a model server.
@@ -90,6 +94,11 @@ def _clean_progress(raw: Any) -> dict:
         value = raw.get(key)
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             progress[key] = int(value)
+
+    for key in _PROGRESS_RATES:
+        value = raw.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            progress[key] = round(max(0.0, float(value)), 1)
 
     current = raw.get("current_file")
     if isinstance(current, str) and current:

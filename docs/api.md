@@ -108,6 +108,11 @@ Bereitschaft, **unauthentifiziert**. Der Endpunkt, den ein Client pollen soll.
 Wie `/v1/ready`, aber mit Token. Praktisch für das Admin-Formular in LLMInt,
 das den Token ohnehin hat.
 
+Beide Endpunkte verstehen `?fresh=1` (auch `true`, `yes`, `on`): der Gateway
+überspringt dann den Health-Cache und fragt die Modellserver sofort neu. Das ist
+für Live-Anzeigen wie die Download-Balken im LLMInt-Adminbereich gedacht; ohne
+den Parameter bleibt es beim `IMAGEINT_HEALTH_CACHE_SECONDS`-Takt.
+
 ### Downloadfortschritt in `components[*].progress`
 
 Lädt ein Modellserver gerade Gewichte aus dem HuggingFace-Cache, hängt er an
@@ -127,7 +132,8 @@ in `components.enhancer.progress` bzw. `components.image.progress` durch — in
       "files_downloaded": 3,
       "files_total": 12,
       "current_file": "diffusion_pytorch_model-00002-of-00004.safetensors",
-      "eta_seconds": 120
+      "eta_seconds": 120,
+      "bytes_per_second": 5242880.0
     }
   }
 }
@@ -141,18 +147,22 @@ in `components.enhancer.progress` bzw. `components.image.progress` durch — in
 | `files_downloaded` / `files_total` | fertige Blobs bzw. Dateien im Repo |
 | `current_file` | Dateiname, die zuletzt gewachsen ist |
 | `eta_seconds` | Restzeit aus dem gleitenden Mittel der Rate; `0` bei fertig |
+| `bytes_per_second` | Übertragungsrate des gleitenden Fensters (≈ 8 s) in Bytes/s; `0.0` bei fertig |
 
 Alle Felder außer `known`/`percent` sind optional. Nach einem erfolgreichen
-Laden meldet der Server dauerhaft `known: true`, `percent: 100.0` und
-`eta_seconds: 0`. **Fehlt `progress` ganz, ist gerade nichts herunterzuladen** —
-idle, nach einem Fehler oder weil der Server den Fortschritt nicht kennt. Ein
-Client soll dann einen unbestimmten Balken zeigen; `known: false` bedeutet
-dagegen „es lädt, aber die Gesamtgröße ist unbekannt" (kein Netz zum Hub,
-privates Repo), dann ist nur `bytes_downloaded` gefüllt.
+Laden meldet der Server dauerhaft `known: true`, `percent: 100.0`,
+`eta_seconds: 0` und `bytes_per_second: 0.0`. **Fehlt `progress` ganz, ist
+gerade nichts herunterzuladen** — idle, nach einem Fehler oder weil der Server
+den Fortschritt nicht kennt. Ein Client soll dann einen unbestimmten Balken
+zeigen; `known: false` bedeutet dagegen „es lädt, aber die Gesamtgröße ist
+unbekannt" (kein Netz zum Hub, privates Repo), dann sind nur
+`bytes_downloaded` und `bytes_per_second` gefüllt.
 
 Die Werte stammen aus einem Poll des Blob-Verzeichnisses im Sekundentakt und
 werden mit dem übrigen Health-Ergebnis für `IMAGEINT_HEALTH_CACHE_SECONDS`
-gecacht; sie aktualisieren sich also höchstens in diesem Takt.
+(Standard 5) gecacht. Für eine Live-Anzeige — etwa die Download-Balken mit
+MB/s im LLMInt-Adminbereich — pollt der Client `/v1/ready?fresh=1` bzw.
+`/v1/health?fresh=1` und überspringt damit den Cache.
 
 Unabhängig von diesem API-Poll schreibt der Gateway den Fortschritt alle
 `IMAGEINT_PROGRESS_LOG_SECONDS` Sekunden (Standard 20, `0` deaktiviert) in sein
@@ -561,7 +571,8 @@ das oben beschriebene `progress`-Objekt:
  "dtype": "bfloat16", "quant": "none", "state": "loading", "loaded": false,
  "loading": true, "error": null, "load_seconds": 0.0, "loaded_at": null,
  "progress": {"known": true, "percent": 42.5, "bytes_downloaded": 123456789,
-              "bytes_total": 296352743424, "eta_seconds": 120}}
+              "bytes_total": 296352743424, "eta_seconds": 120,
+              "bytes_per_second": 5242880.0}}
 ```
 
 Der Enhancerserver antwortet auf `/health` mit demselben Aufbau und demselben

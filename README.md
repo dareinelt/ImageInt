@@ -331,7 +331,7 @@ ab) in sein eigenes Log. Damit zeigt `docker compose logs -f gateway` den
 Kaltstart ohne Admin-Oberfläche:
 
 ```text
-2026-10-19 12:53:20,114 INFO imageint.progress: Bildmodell: Download 42,5 %, 117,7 MB von 276,0 GB, Datei 3/12, diffusion_pytorch_model-00002-of-00004.safetensors, noch 2 min 5 s
+2026-10-19 12:53:20,114 INFO imageint.progress: Bildmodell: Download 42,5 %, 117,7 MB von 276,0 GB, 5,0 MB/s, Datei 3/12, diffusion_pytorch_model-00002-of-00004.safetensors, noch 2 min 5 s
 2026-10-19 12:53:40,116 INFO imageint.progress: Prompt-Enhancer: bereit, Download abgeschlossen.
 ```
 

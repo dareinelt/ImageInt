@@ -66,6 +66,7 @@ PROGRESS = {
     "files_total": 12,
     "current_file": "diffusion_pytorch_model-00002-of-00004.safetensors",
     "eta_seconds": 120,
+    "bytes_per_second": 1048576.5,
 }
 
 
@@ -80,6 +81,7 @@ async def test_health_forwards_the_download_progress(fake):
     assert result["progress"]["bytes_total"] == 296352743424
     assert result["progress"]["current_file"] == PROGRESS["current_file"]
     assert result["progress"]["eta_seconds"] == 120
+    assert result["progress"]["bytes_per_second"] == 1048576.5
 
 
 async def test_health_forwards_the_progress_of_a_ready_server(fake):
@@ -112,6 +114,23 @@ async def test_health_ignores_a_malformed_progress(fake):
 def test_the_progress_percentage_is_clamped(percent):
     cleaned = vllm._clean_progress({"known": True, "percent": percent})
     assert 0.0 <= cleaned["percent"] <= 100.0
+
+
+def test_the_progress_rate_is_kept_as_a_float():
+    cleaned = vllm._clean_progress(
+        {"known": False, "bytes_downloaded": 10, "bytes_per_second": 1048576.5}
+    )
+    assert cleaned["bytes_per_second"] == 1048576.5
+
+    clamped = vllm._clean_progress(
+        {"known": False, "bytes_downloaded": 10, "bytes_per_second": -5}
+    )
+    assert clamped["bytes_per_second"] == 0.0
+
+    ignored = vllm._clean_progress(
+        {"known": False, "bytes_downloaded": 10, "bytes_per_second": "5"}
+    )
+    assert "bytes_per_second" not in ignored
 
 
 # -- the image request ------------------------------------------------------ #
