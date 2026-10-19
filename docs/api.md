@@ -113,6 +113,16 @@ Beide Endpunkte verstehen `?fresh=1` (auch `true`, `yes`, `on`): der Gateway
 für Live-Anzeigen wie die Download-Balken im LLMInt-Adminbereich gedacht; ohne
 den Parameter bleibt es beim `IMAGEINT_HEALTH_CACHE_SECONDS`-Takt.
 
+Scheitert ein Modellserver beim Laden der Gewichte, antwortet er auf `/health`
+mit `500` und schreibt den Grund in `message`. Der Gateway reicht diesen Text
+wörtlich weiter, `components.image.message` enthält also nicht nur den
+Statuscode, sondern die eigentliche Ursache:
+
+```json
+{"components": {"image": {"state": "error", "ready": false,
+  "message": "Modellserver meldet HTTP 500. RuntimeError: [enforce fail at alloc_cpu.cpp:121] DefaultCPUAllocator: can't allocate memory"}}}
+```
+
 ### Downloadfortschritt in `components[*].progress`
 
 Lädt ein Modellserver gerade Gewichte aus dem HuggingFace-Cache, hängt er an

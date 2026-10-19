@@ -122,6 +122,27 @@ def _health_progress(response: httpx.Response) -> dict:
     return _clean_progress(decoded.get("progress"))
 
 
+def _health_message(response: httpx.Response) -> str:
+    """The ``message`` of a ``/health`` body, or ``""``.
+
+    A model server that failed to load its weights answers 500 and puts the
+    reason in ``message``. Without it the operator only ever sees the status
+    code and has to dig through the container log.
+    """
+
+    try:
+        decoded = response.json()
+    except ValueError:
+        return ""
+    if not isinstance(decoded, dict):
+        return ""
+    for key in ("message", "detail"):
+        value = decoded.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
 async def health(url: str, token: str, model: str, *, timeout: float = 10.0) -> dict:
     """Probe one vLLM server through its ``/health`` endpoint.
 
@@ -192,13 +213,20 @@ async def health(url: str, token: str, model: str, *, timeout: float = 10.0) -> 
             payload["progress"] = progress
         return payload
 
-    return {
+    message = f"Modellserver meldet HTTP {response.status_code}."
+    detail = _health_message(response)
+    if detail:
+        message = f"{message} {detail}"
+    payload = {
         **result,
         "ok": False,
         "loading": False,
         "http": response.status_code,
-        "message": f"Modellserver meldet HTTP {response.status_code}.",
+        "message": message,
     }
+    if progress:
+        payload["progress"] = progress
+    return payload
 
 
 async def warmup(url: str, token: str, *, timeout: float = 10.0) -> bool:
