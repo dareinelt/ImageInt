@@ -167,11 +167,19 @@ Engine ab. `enhancer_server/` lädt denselben Checkpoint deshalb über
 **transformers**, das den Remote-Code des Checkpoints ausführt.
 
 Damit laufen **beide** Modell-Container auf demselben Stack (`torch`,
-`transformers`, CPU-Wheels ohne CUDA), teilen sich dieselbe
+`torchvision`, `transformers`, CPU-Wheels ohne CUDA), teilen sich dieselbe
 Genauigkeitsrichtlinie (bf16) und denselben Health-Vertrag (200 = bereit,
 503 = lädt). Der Gateway merkt davon nichts: der Enhancer spricht die
 **OpenAI Chat-Completions API** über SSE, inklusive `reasoning_content` für den
 Denkblock — genau die Form, die der Gateway schon gelesen hat.
+
+`torchvision` steht deshalb im Enhancer-Stack, weil der Checkpoint ein
+Qwen3.5-VL ist: `AutoProcessor` baut auch den Video-Teil seines Prozessors auf,
+und der verlangt die Bibliothek, obwohl der Enhancer ausschließlich Text
+schickt. Ohne sie endet der Start mit `ImportError: Qwen3VLVideoProcessor
+requires the Torchvision library`. Der Dockerfile installiert `torch` und
+`torchvision` gemeinsam aus demselben Wheel-Index, damit die beiden Builds
+zueinander passen.
 
 **llama.cpp wurde geprüft und verworfen.** Es wäre technisch möglich, aber es
 bräuchte eine GGUF-Konvertierung des 9B-Checkpoints und würde dessen eigenes
@@ -362,6 +370,12 @@ siehe Speicherbudget oben) und `IMAGEINT_IMAGE_QUANT=int8|int4` auf einem
 `diffusers`, das die Quantisierungskonfiguration anders erwartet — int8/int4
 brauchen `diffusers>=0.41.0` und `optimum-quanto`, beides steht in
 `image_server/requirements.txt`.
+
+Beim Enhancer ist `ImportError: Qwen3VLVideoProcessor requires the Torchvision
+library` ein Zeichen für ein Image, das vor dem `torchvision`-Eintrag in
+`enhancer_server/requirements.txt` gebaut wurde. `docker compose build
+enhancer` und ein Neustart des Containers beheben das; ein Neuversuch mit dem
+alten Image hilft nicht.
 
 Mit `IMAGEINT_IMAGE_PRELOAD=false` lädt das Bildmodell erst beim ersten Auftrag.
 Damit die dokumentierte Empfehlung „später erneut" dann nicht ins Leere läuft,
