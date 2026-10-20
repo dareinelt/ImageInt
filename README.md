@@ -133,8 +133,8 @@ Drei Container, nur einer davon veröffentlicht:
 | Dienst | Inhalt | Port | Rolle |
 |---|---|---|---|
 | `gateway` | `gateway/` — FastAPI | **8080 → Host** | einzige öffentliche API |
-| `enhancer` | `enhancer_server/` — transformers + torch | intern 8000 | Prompt-Enhancer |
-| `image` | `image_server/` — diffusers + transformers | intern 8000 | Bildmodell |
+| `enhancer` | `enhancer_server/` — transformers + torch + torchvision | intern 8000 | Prompt-Enhancer |
+| `image` | `image_server/` — diffusers + transformers + torchvision | intern 8000 | Bildmodell |
 
 Der Gateway hält **keine Gewichte**. Er kennt die Prompts, die
 Sampling-Parameter und die Modell-IDs als Konfiguration, sodass ein
@@ -152,6 +152,8 @@ damit nicht erfüllbar, deshalb wird das Bildmodell von `image_server/` bedient:
   `QwenImage21Pipeline` nicht),
 - **`transformers` ≥ 5.17** für Text-Encoder und Tokenizer,
 - **`torch`** in der CPU-Variante, ohne CUDA-Bibliotheken im Referenz-Image,
+- **`torchvision`** neben `torch`, weil der Text-Encoder ein Qwen3.5-VL ist und
+  sein Prozessor den Video-Teil mitbaut,
 - **`optimum-quanto`** für die int8/int4-Quantisierung auf der CPU.
 
 Der Container spricht trotzdem die **OpenAI Images API**, also blieb auf der
@@ -173,12 +175,14 @@ Genauigkeitsrichtlinie (bf16) und denselben Health-Vertrag (200 = bereit,
 **OpenAI Chat-Completions API** über SSE, inklusive `reasoning_content` für den
 Denkblock — genau die Form, die der Gateway schon gelesen hat.
 
-`torchvision` steht deshalb im Enhancer-Stack, weil der Checkpoint ein
-Qwen3.5-VL ist: `AutoProcessor` baut auch den Video-Teil seines Prozessors auf,
-und der verlangt die Bibliothek, obwohl der Enhancer ausschließlich Text
-schickt. Ohne sie endet der Start mit `ImportError: Qwen3VLVideoProcessor
-requires the Torchvision library`. Der Dockerfile installiert `torch` und
-`torchvision` gemeinsam aus demselben Wheel-Index, damit die beiden Builds
+`torchvision` steht deshalb in **beiden** Modell-Stacks, weil beide
+Qwen3.5-VL-Komponenten laden: beim Enhancer ist es das Modell selbst, beim
+Bildmodell der Text-Encoder der Pipeline. `AutoProcessor` baut auch den
+Video-Teil des Prozessors auf, und der verlangt die Bibliothek, obwohl beide
+Server ausschließlich Text schicken. Ohne sie endet der Start mit
+`ImportError: Qwen3VLVideoProcessor requires the Torchvision library` und
+`/health` antwortet dauerhaft 500. Beide Dockerfiles installieren `torch` und
+`torchvision` gemeinsam aus demselben Wheel-Index, damit CPU- und CUDA-Build
 zueinander passen.
 
 **llama.cpp wurde geprüft und verworfen.** Es wäre technisch möglich, aber es
@@ -371,10 +375,11 @@ siehe Speicherbudget oben) und `IMAGEINT_IMAGE_QUANT=int8|int4` auf einem
 brauchen `diffusers>=0.41.0` und `optimum-quanto`, beides steht in
 `image_server/requirements.txt`.
 
-Beim Enhancer ist `ImportError: Qwen3VLVideoProcessor requires the Torchvision
-library` ein Zeichen für ein Image, das vor dem `torchvision`-Eintrag in
-`enhancer_server/requirements.txt` gebaut wurde. `docker compose build
-enhancer` und ein Neustart des Containers beheben das; ein Neuversuch mit dem
+Bei beiden Modellservern ist `ImportError: Qwen3VLVideoProcessor requires the
+Torchvision library` ein Zeichen für ein Image, das vor dem
+`torchvision`-Eintrag in `enhancer_server/requirements.txt` bzw.
+`image_server/requirements.txt` gebaut wurde. `docker compose build enhancer
+image` und ein Neustart der Container beheben das; ein Neuversuch mit dem
 alten Image hilft nicht.
 
 Mit `IMAGEINT_IMAGE_PRELOAD=false` lädt das Bildmodell erst beim ersten Auftrag.

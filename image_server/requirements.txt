@@ -8,6 +8,14 @@
 # The Dockerfile installs torch first from the CPU wheel index; pip then sees
 # this constraint as already satisfied.
 torch>=2.4.0
+
+# The pipeline's text encoder is a Qwen3.5-VL, so its processor is a multimodal
+# one. AutoProcessor builds every sub-processor eagerly, including the video
+# part, and that class requires torchvision. Without the wheel loading the
+# pipeline fails with "Qwen3VLVideoProcessor requires the Torchvision library"
+# even though this server only ever sends text. The Dockerfile installs it next
+# to torch from the same wheel index, so both builds match.
+torchvision>=0.19.0
 transformers>=5.17
 diffusers>=0.41.0
 accelerate>=1.0.0
