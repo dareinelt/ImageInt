@@ -48,8 +48,12 @@ RUN useradd --uid 10002 --create-home --shell /usr/sbin/nologin imageint \
 # ── CUDA target (preparation only) ───────────────────────────────────────────
 FROM base AS cuda
 
+# torch and torchvision are published as a matched pair, so both come from the
+# same index in one step; resolving torchvision from PyPI would pull a CUDA
+# torch back in. torchvision is required by the checkpoint's video
+# sub-processor, which AutoProcessor builds even for text-only requests.
 ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu124
-RUN pip install --no-cache-dir --index-url "${TORCH_INDEX_URL}" torch \
+RUN pip install --no-cache-dir --index-url "${TORCH_INDEX_URL}" torch torchvision \
  && pip install --no-cache-dir -r /tmp/requirements.txt
 
 COPY --chown=imageint:imageint . /app/enhancer_server
@@ -66,10 +70,13 @@ CMD ["python", "-m", "enhancer_server"]
 # ── CPU target (reference, default) ──────────────────────────────────────────
 FROM base AS cpu
 
-# torch first, from the CPU-only index, so pip never resolves a CUDA wheel that
-# would add roughly 2 GB of unused libraries to the image.
+# torch and torchvision first, from the CPU-only index, so pip never resolves a
+# CUDA wheel that would add roughly 2 GB of unused libraries to the image. The
+# two are installed in one step because they are published as a matched pair;
+# torchvision itself is required by the checkpoint's video sub-processor, which
+# AutoProcessor builds even for text-only requests.
 ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
-RUN pip install --no-cache-dir --index-url "${TORCH_INDEX_URL}" torch \
+RUN pip install --no-cache-dir --index-url "${TORCH_INDEX_URL}" torch torchvision \
  && pip install --no-cache-dir -r /tmp/requirements.txt
 
 COPY --chown=imageint:imageint . /app/enhancer_server
