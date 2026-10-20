@@ -29,6 +29,13 @@ The thinking block is deliberately *not* part of ``content``. That keeps the
 gateway's ``split_thinking`` a no-op instead of making it depend on the model
 finishing its reasoning, and it means the answer the gateway parses is exactly
 the JSON object the model was asked for.
+
+An answer is never empty. The engine repeats a generation that produced nothing
+but a thinking block once with thinking disabled, and a generation that fails
+ends the stream with ``finish_reason: "error"`` plus an ``error`` object in the
+final delta. The status line is 200 by then, so that frame is the only place the
+reason can be reported -- and a client that only looks at ``content`` would
+otherwise see a successful request with an empty answer.
 """
 
 from __future__ import annotations
@@ -296,9 +303,22 @@ def _stream(
                 yield _chunk(completion_id, created, model, {"content": content})
 
         if failure:
-            log.error("[enhancer] Generierung abgebrochen: %s", failure[0])
+            error = failure[0]
+            log.error("[enhancer] Generierung abgebrochen: %s", error)
+            # The status line is already 200 at this point, so the reason has to
+            # travel in the stream: without it the client only sees an answer
+            # without content and cannot tell why.
             yield _chunk(
-                completion_id, created, model, {}, finish_reason="error"
+                completion_id,
+                created,
+                model,
+                {
+                    "error": {
+                        "message": str(error) or type(error).__name__,
+                        "type": "engine_error",
+                    }
+                },
+                finish_reason="error",
             )
         else:
             yield _chunk(completion_id, created, model, {}, finish_reason="stop")
@@ -418,6 +438,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     "dtype": status["dtype"],
                     "quant": status["quant"],
                     "engine": status["engine"],
+                    "parameters": status["parameters"],
+                    "weight_bytes": status["weight_bytes"],
                 }
             ],
         }

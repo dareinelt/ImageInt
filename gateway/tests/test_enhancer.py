@@ -209,6 +209,36 @@ async def test_enhance_keeps_the_generation_when_the_answer_is_unparseable(fake)
     assert (result["width"], result["height"]) == (2048, 2048)
 
 
+async def test_enhance_fails_when_the_answer_is_empty(fake):
+    """Thinking that never closes leaves no answer. The server repeats such a
+    generation without thinking, so an empty answer here means the enhancer is
+    broken -- it is reported instead of being replaced by the input prompt."""
+
+    fake.enhancer_reasoning = ""
+    fake.enhancer_raw = "<think>Ich überlege noch"
+
+    with pytest.raises(ImageIntError) as excinfo:
+        await enhancer.enhance(settings(), "ein rotes Haus")
+
+    assert excinfo.value.code == "enhancer_empty"
+
+
+async def test_enhance_reports_a_failed_generation(fake):
+    """The enhancer server ends a failed stream with finish_reason=error and puts
+    the reason into the last delta; the gateway has to surface that reason."""
+
+    fake.enhancer_answer = ""
+    fake.enhancer_reasoning = ""
+    fake.enhancer_finish_reason = "error"
+    fake.enhancer_error = "Die Generierung ist fehlgeschlagen: out of memory"
+
+    with pytest.raises(ImageIntError) as excinfo:
+        await enhancer.enhance(settings(), "ein rotes Haus")
+
+    assert excinfo.value.code == "enhancer_error"
+    assert "out of memory" in excinfo.value.message
+
+
 async def test_enhance_clamps_to_the_pixel_budget(fake):
     result = await enhancer.enhance(settings(), "ein rotes Haus", max_pixels=1024 * 1024)
     assert result["width"] * result["height"] <= 1024 * 1024

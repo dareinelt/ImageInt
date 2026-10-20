@@ -19,12 +19,13 @@ a model object is not safe to call from two threads at once.
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import random
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Iterator, Optional, Sequence
 
 from .config import Settings
@@ -33,15 +34,17 @@ from .progress import DownloadProgress
 log = logging.getLogger("imageint.enhancer.engine")
 
 #: Model classes that can host the checkpoint, in the order they are tried. The
-#: enhancer is a Qwen3.5-VL derivative, so the plain causal-LM entry point may
-#: not be the right one -- but which one is right depends on the transformers
-#: version, so the class is looked up by name at load time instead of being
-#: imported directly.
+#: enhancer is a Qwen3.5-VL derivative, so the multimodal entry points come
+#: first: the plain causal-LM one also accepts such a checkpoint but loads the
+#: text-only half of it, which then ignores the processor's multimodal inputs
+#: and answers with an empty string. Which classes a given transformers version
+#: offers is version dependent, so they are looked up by name at load time
+#: instead of being imported directly.
 MODEL_CLASSES = (
-    "AutoModelForCausalLM",
     "Qwen3VLForConditionalGeneration",
     "AutoModelForImageTextToText",
     "AutoModelForVision2Seq",
+    "AutoModelForCausalLM",
 )
 
 
@@ -273,6 +276,11 @@ class BaseEngine:
         self._error = ""
         self._load_seconds = 0.0
         self._loaded_at = 0.0
+        #: What was actually loaded. Reported by ``/health`` so an operator can
+        #: tell a real 9B checkpoint from a class that quietly loaded nothing.
+        self._model_class = ""
+        self._parameters = 0
+        self._weight_bytes = 0
         self._thread: Optional[threading.Thread] = None
         self._progress: Optional[DownloadProgress] = self._make_progress()
 
@@ -354,18 +362,65 @@ class BaseEngine:
         ``usage`` is filled in by the engine, which is the only side that can
         count tokens: it is passed in rather than returned because the deltas
         are streamed while the counts are only known at the end.
+
+        An answer without any content is not a valid answer -- the gateway
+        forwards the content to the image server, which rejects an empty prompt.
+        When a generation ends with nothing but a thinking block, it is repeated
+        once with thinking disabled; if that produces nothing either, the
+        request fails with :class:`EngineError` instead of returning ``""``.
         """
 
         self.ensure_loaded()
         if self._state != "ready":
             raise EngineError(self._error or "Das Enhancer-Modell ist nicht geladen.")
         with self._generate_lock:
-            splitter = self._splitter(request)
-            for chunk in self._generate(request, usage):
-                for piece in splitter.feed(chunk):
-                    yield piece
-            for piece in splitter.flush():
-                yield piece
+            content_seen, reasoning_chars = yield from self._stream_attempt(request, usage)
+            if content_seen:
+                return
+
+            if request.enable_thinking:
+                log.warning(
+                    "[enhancer] Die Antwort bestand nur aus %d Zeichen Denk-Block "
+                    "und enthielt keinen Prompt; ein zweiter Versuch läuft ohne "
+                    "Denk-Block.",
+                    reasoning_chars,
+                )
+                content_seen, reasoning_chars = yield from self._stream_attempt(
+                    replace(request, enable_thinking=False), usage
+                )
+                if content_seen:
+                    return
+
+            raise EngineError(
+                "Der Enhancer hat keinen Prompt erzeugt: "
+                f"{reasoning_chars} Zeichen Denk-Block, aber kein Inhalt. Das "
+                "deutet auf ein zu kleines Token-Budget "
+                "(IMAGEINT_PE_MAX_NEW_TOKENS) oder auf ein Modell hin, das die "
+                "Chat-Vorlage des Checkpoints nicht kennt."
+            )
+
+    def _stream_attempt(
+        self,
+        request: ChatRequest,
+        usage: Optional[dict] = None,
+    ) -> Iterator[tuple[str, str]]:
+        """One generation; returns ``(content_seen, reasoning_chars)``."""
+
+        splitter = self._splitter(request)
+        content_seen = False
+        reasoning_chars = 0
+        for chunk in self._generate(request, usage):
+            for reasoning, content in splitter.feed(chunk):
+                reasoning_chars += len(reasoning)
+                if content:
+                    content_seen = True
+                yield reasoning, content
+        for reasoning, content in splitter.flush():
+            reasoning_chars += len(reasoning)
+            if content:
+                content_seen = True
+            yield reasoning, content
+        return content_seen, reasoning_chars
 
     def _load(self) -> None:
         raise NotImplementedError
@@ -410,6 +465,9 @@ class BaseEngine:
             "error": self._error,
             "load_seconds": round(self._load_seconds, 1),
             "loaded_at": self._loaded_at,
+            "model_class": self._model_class,
+            "parameters": self._parameters,
+            "weight_bytes": self._weight_bytes,
         }
         progress = self._progress.snapshot() if self._progress is not None else {}
         if progress:
@@ -435,6 +493,7 @@ class TransformersEngine(BaseEngine):
         self._tokenizer = None
         self._processor = None
         self._warned_presence_penalty = False
+        self._warned_unsupported_inputs: set[str] = set()
 
     def _make_progress(self) -> Optional[DownloadProgress]:
         return DownloadProgress(
@@ -486,19 +545,81 @@ class TransformersEngine(BaseEngine):
                 "der Enhancer braucht sie, um den Prompt aufzubereiten."
             )
 
-        model_cls, model_name = self._resolve_model_class(transformers)
+        model_cls = None
+        model_name = ""
         kwargs = dict(common, torch_dtype=dtype)
         quant_config = self._quantization_config(transformers)
         if quant_config is not None:
             kwargs["quantization_config"] = quant_config
 
-        log.info("[enhancer] loading weights as %s", model_name)
-        model = model_cls.from_pretrained(self.settings.model, **kwargs)
+        failures: list[str] = []
+        model = None
+        for model_cls, model_name in self._model_class_candidates(transformers):
+            log.info("[enhancer] loading weights as %s", model_name)
+            try:
+                model = model_cls.from_pretrained(self.settings.model, **kwargs)
+            except Exception as exc:  # noqa: BLE001 - the next class may fit
+                failures.append(f"{model_name}: {exc}")
+                log.warning(
+                    "[enhancer] %s konnte %s nicht laden: %s",
+                    model_name,
+                    self.settings.model,
+                    exc,
+                )
+                continue
+            self._model_class = model_name
+            break
+
+        if model is None:
+            raise EngineError(
+                f"Keine der Modellklassen konnte {self.settings.model} laden: "
+                + "; ".join(failures)
+            )
+
         model.to(self.settings.device)
         model.eval()
         self._model = model
+        self._record_size(model)
 
         self._warn_if_context_is_tight()
+
+    def _record_size(self, model) -> None:
+        """Log what was loaded, and how large it is.
+
+        The parameter count is the cheapest proof that the weights are really in
+        memory and that the right half of the checkpoint was loaded: a class
+        that only picks up the text half reports a fraction of the checkpoint's
+        size, and an empty model reports nothing at all.
+        """
+
+        parameters = 0
+        weight_bytes = 0
+        try:
+            for parameter in model.parameters():
+                count = int(parameter.numel())
+                parameters += count
+                weight_bytes += count * int(parameter.element_size())
+        except Exception:  # noqa: BLE001 - diagnostics must never break a load
+            return
+
+        self._parameters = parameters
+        self._weight_bytes = weight_bytes
+        name = self._model_class or type(model).__name__
+        if not parameters:
+            log.warning(
+                "[enhancer] %s meldet keine Parameter; der Checkpoint ist damit "
+                "nicht geladen und der Enhancer kann nicht antworten.",
+                name,
+            )
+            return
+        log.info(
+            "[enhancer] %s geladen: %.2fB Parameter, %.1f GB Gewichte (%s auf %s)",
+            name,
+            parameters / 1e9,
+            weight_bytes / 1024**3,
+            self.settings.dtype,
+            self.settings.device,
+        )
 
     def _load_processor(self, transformers, common: dict):
         """The processor, falling back to the plain tokenizer."""
@@ -518,22 +639,27 @@ class TransformersEngine(BaseEngine):
             f"{self.settings.model} laden: {last_error}"
         )
 
-    def _resolve_model_class(self, transformers) -> tuple[Any, str]:
-        """The first model class of :data:`MODEL_CLASSES` that exists.
+    def _model_class_candidates(self, transformers) -> list[tuple[Any, str]]:
+        """The available classes of :data:`MODEL_CLASSES`, in that order.
 
         Which class can host the checkpoint depends on the transformers
         version, so the candidates are resolved by name instead of imported.
+        They are all kept rather than only the first one: the multimodal class
+        is the right one, and a version that cannot load the checkpoint through
+        it still has to be able to try the next one.
         """
 
-        available = [
-            name for name in MODEL_CLASSES if getattr(transformers, name, None) is not None
+        candidates = [
+            (getattr(transformers, name), name)
+            for name in MODEL_CLASSES
+            if getattr(transformers, name, None) is not None
         ]
-        if not available:
+        if not candidates:
             raise EngineError(
                 "Diese transformers-Version kennt keine der Klassen "
                 f"{', '.join(MODEL_CLASSES)}."
             )
-        return getattr(transformers, available[0]), available[0]
+        return candidates
 
     def _quantization_config(self, transformers):
         """Translate ``IMAGEINT_PE_QUANT`` into a quanto configuration."""
@@ -560,6 +686,9 @@ class TransformersEngine(BaseEngine):
         self._model = None
         self._tokenizer = None
         self._processor = None
+        self._model_class = ""
+        self._parameters = 0
+        self._weight_bytes = 0
         super().close()
 
     # -- chat template ----------------------------------------------------- #
@@ -700,8 +829,62 @@ class TransformersEngine(BaseEngine):
             if "input_ids" not in clean:
                 last_error = EngineError("Die Tokenisierung ergab keine input_ids.")
                 continue
+            clean = self._drop_unsupported_inputs(clean)
             return {key: value.to(self.settings.device) for key, value in clean.items()}
         raise EngineError(f"Der Prompt konnte nicht tokenisiert werden: {last_error}")
+
+    def _drop_unsupported_inputs(self, inputs: dict) -> dict:
+        """Remove the inputs the loaded model does not accept.
+
+        A multimodal processor returns more than ``input_ids`` and
+        ``attention_mask``: ``Qwen3VLProcessor`` adds ``mm_token_type_ids``.
+        ``generate()`` refuses kwargs its model cannot take, which fails the
+        whole request within milliseconds and leaves the caller with an empty
+        answer -- so an input the loaded class does not know is dropped and
+        reported instead of being passed on.
+        """
+
+        accepted = self._model_input_keys()
+        if accepted is None:
+            return inputs
+        kept_always = {"input_ids", "attention_mask"}
+        dropped = [
+            key for key in inputs if key not in accepted and key not in kept_always
+        ]
+        for key in dropped:
+            if key in self._warned_unsupported_inputs:
+                continue
+            self._warned_unsupported_inputs.add(key)
+            log.warning(
+                "[enhancer] %s nimmt %s nicht an; das Eingabefeld wird "
+                "verworfen. Das passiert, wenn statt der multimodalen "
+                "Modellklasse eine reine Text-Klasse geladen wurde.",
+                self._model_class or type(self._model).__name__,
+                key,
+            )
+        return {key: value for key, value in inputs.items() if key not in dropped}
+
+    def _model_input_keys(self) -> Optional[set[str]]:
+        """The keyword names the loaded model's ``forward`` accepts, if known."""
+
+        model = self._model
+        if model is None:
+            return None
+        try:
+            signature = inspect.signature(model.forward)
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if any(
+            parameter.kind is parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        ):
+            return None
+        return {
+            name
+            for name, parameter in signature.parameters.items()
+            if parameter.kind
+            in (parameter.POSITIONAL_OR_KEYWORD, parameter.KEYWORD_ONLY)
+        }
 
     def _abort_criteria(self, abort: threading.Event):
         """A stopping criterion that ends the generation when asked to.

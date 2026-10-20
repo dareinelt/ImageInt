@@ -497,3 +497,32 @@ def test_a_broken_engine_answers_500_with_the_reason():
         response = client.post("/v1/chat/completions", json=body())
     assert response.status_code == 500
     assert "Gewichte" in response.json()["error"]["message"]
+
+
+class BrokenGenerationEngine(BaseEngine):
+    """An engine that loads fine and fails while generating."""
+
+    name = "broken-generation"
+
+    def _load(self) -> None:
+        pass
+
+    def _generate(self, request, usage=None):
+        raise EngineError("Die Generierung ist fehlgeschlagen: out of memory")
+
+
+def test_a_generation_failure_travels_in_the_stream():
+    """The status line is already 200 when the generation fails, so the reason
+    has to arrive in the last frame; without it the client only sees an answer
+    without content and cannot tell why."""
+
+    with running(settings(), BrokenGenerationEngine) as (_app, client):
+        response = client.post("/v1/chat/completions", json=body(stream=True))
+
+    frames = [frame for frame in events(response.text) if frame != "[DONE]"]
+    last = frames[-1]["choices"][0]
+
+    assert last["finish_reason"] == "error"
+    assert last["delta"]["error"]["type"] == "engine_error"
+    assert "out of memory" in last["delta"]["error"]["message"]
+    assert deltas(frames, "content") == ""

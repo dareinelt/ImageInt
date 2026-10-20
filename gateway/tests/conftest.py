@@ -78,6 +78,12 @@ class FakeVllm:
         self.enhancer_answer = json.dumps(ENHANCER_ANSWER, ensure_ascii=False)
         #: Set to a raw string to bypass the answer object entirely.
         self.enhancer_raw = ""
+        #: Final ``finish_reason`` of the streamed answer. ``error`` is what the
+        #: enhancer server reports when its engine failed mid-generation.
+        self.enhancer_finish_reason = "stop"
+        #: Reason the enhancer server puts into the last delta when its engine
+        #: failed; empty means the answer was fine.
+        self.enhancer_error = ""
         #: Status of ``POST /v1/images/generations``.
         self.image_status = 200
         self.image_size = (8, 8)
@@ -121,9 +127,16 @@ class FakeVllm:
             chunks.append({"choices": [{"delta": {"reasoning_content": self.enhancer_reasoning}}]})
         for piece in answer:
             chunks.append({"choices": [{"delta": {"content": piece}}]})
+        final_delta = (
+            {"error": {"message": self.enhancer_error, "type": "engine_error"}}
+            if self.enhancer_error
+            else {}
+        )
         chunks.append(
             {
-                "choices": [{"delta": {}, "finish_reason": "stop"}],
+                "choices": [
+                    {"delta": final_delta, "finish_reason": self.enhancer_finish_reason}
+                ],
                 "usage": {"prompt_tokens": 640, "completion_tokens": 128, "total_tokens": 768},
                 "model": "Qwen-Image-2.1-PE-T2I",
             }

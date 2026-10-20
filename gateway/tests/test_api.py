@@ -306,6 +306,20 @@ def test_generation_can_skip_the_enhancer(client, fake):
     assert fake.image_requests[-1]["prompt"] == "Ein roter Panda"
 
 
+def test_generation_fails_when_the_enhancer_answers_nothing(client, fake):
+    """The image server rejects an empty prompt with HTTP 422, so an empty
+    answer has to fail here with the real reason instead of being forwarded."""
+
+    fake.enhancer_reasoning = ""
+    fake.enhancer_raw = "<think>Ich überlege noch"
+
+    response = client.post(GENERATE, json={"prompt": "Ein roter Panda im Schnee"})
+
+    assert response.status_code == 502, response.text
+    assert response.json()["error"] == "enhancer_empty"
+    assert fake.image_requests == []
+
+
 def test_a_client_that_omits_enhance_follows_the_operator_setting(client_factory, fake):
     # LLMInt only ever sends a prompt, so the default has to be "whatever the
     # operator configured". Otherwise IMAGEINT_PE_ENABLED=false would break

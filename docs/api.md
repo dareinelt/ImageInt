@@ -475,6 +475,19 @@ curl -s -X POST localhost:8080/v1/enhance \
 }
 ```
 
+`parse_ok` ist `false`, wenn die Antwort des Enhancers kein auswertbares JSON
+enthält. Dann wird die Antwort selbst als Prompt verwendet — Prosa ist ein
+gültiger Prompt.
+
+Eine **leere** Antwort ist dagegen ein Fehler und keine Generierung ohne
+Prompt: der Bildserver lehnt `prompt: ""` mit `422` ab. Der Enhancer-Server
+wiederholt eine Antwort, die nur aus einem nicht geschlossenen Denkblock
+besteht, einmal mit abgeschaltetem Denkblock; bleibt auch der zweite Versuch
+ohne Inhalt oder scheitert die Generierung, endet der Stream mit
+`finish_reason: "error"` und einem `error`-Objekt, und der Gateway antwortet mit
+`502` und `enhancer_error` bzw. `enhancer_empty` — statt eine Anfrage
+weiterzureichen, die nur an einer anderen Stelle scheitern kann.
+
 ---
 
 ## Tabellen
@@ -518,6 +531,7 @@ Antwort-Headern `X-ImageInt-Width` / `X-ImageInt-Height` und im Job.
 | `busy` | 503 | Alle Renderplätze belegt — **transient**, `Retry-After` beachten |
 | `cancelled` | 503 | Auftrag abgebrochen |
 | `enhancer_error` | 502 | Der Enhancer hat fehlerhaft geantwortet |
+| `enhancer_empty` | 502 | Der Enhancer hat keinen Prompt erzeugt |
 | `enhancer_unavailable` | 502 | Der Enhancer ist nicht erreichbar |
 | `image_error` | 502 | Das Bildmodell hat fehlerhaft geantwortet |
 | `image_unavailable` | 502 | Das Bildmodell ist nicht erreichbar |
@@ -695,6 +709,15 @@ Unterschiede, die man kennen muss:
 - **`max_tokens` ist eine Obergrenze, keine Vorgabe.** Ein Client kann um eine
   kürzere Antwort bitten, nie um eine längere als `IMAGEINT_PE_MAX_NEW_TOKENS`.
   Eine explizite `0` ist ein fehlerhafter Request (400), kein fehlendes Feld.
+- **Eine Antwort ist nie leer.** Endet eine Generierung nur mit einem nicht
+  geschlossenen Denkblock, wiederholt der Server sie einmal mit
+  `enable_thinking: false`; bleibt auch das ohne Inhalt, ist das ein Fehler und
+  keine leere Antwort. Ein leerer Prompt wird vom Bildserver mit `422` abgelehnt,
+  ein Durchreichen hätte also nur den Fehler verlagert.
+- **Ein Fehler endet im Stream.** Der Statuscode ist zu diesem Zeitpunkt längst
+  `200`, deshalb trägt der letzte Frame `finish_reason: "error"` und ein
+  `error`-Objekt mit der Ursache — der Gateway macht daraus `502`
+  (`enhancer_error`).
 - **`enable_thinking` darf pro Request gesetzt werden** und überschreibt
   `IMAGEINT_PE_ENABLE_THINKING`.
 - **Unbekannte Felder werden ignoriert**, damit ein Gateway mit einer neueren
@@ -705,3 +728,24 @@ Der Vertrag zwischen Gateway und Enhancerserver wird von
 Server auf einem echten Socket und schickt ihm den echten Request-Body des
 Gateways, bis hin zum geparsten JSON (`rewritten_prompt`, `negative_prompt`,
 `wh_ratio`).
+
+### `GET /health` des Enhancerservers
+
+`200` bereit, `503` lädt noch, `500` fehlgeschlagen — wie beim Bildserver, plus
+drei Felder, die den Ladevorgang nachprüfbar machen:
+
+```json
+{"ok": true, "status": "ready",
+ "model": "Qwen/Qwen-Image-2.1-PE-T2I",
+ "model_class": "Qwen3VLForConditionalGeneration",
+ "parameters": 9000000000, "weight_bytes": 18000000000,
+ "dtype": "bfloat16", "device": "cpu", "load_seconds": 214.7}
+```
+
+`parameters` und `weight_bytes` sind die einzige Prüfung von außen, ob die
+Gewichte wirklich im Speicher liegen. Ein Text-only-Halbschnitt des
+Checkpoints, ein fehlgeschlagener Ladevorgang oder ein Stub melden eine andere
+Zahl — und die RAM-Auslastung des Hosts wächst entsprechend. Der Start loggt
+dieselbe Zeile: `[enhancer] Qwen3VLForConditionalGeneration geladen: 9.00B
+Parameter, 16.8 GB Gewichte (bfloat16 auf cpu)`. Ein Checkpoint dieser Größe
+kann auf einem Host mit 3,4 GB belegtem RAM nicht geladen sein.

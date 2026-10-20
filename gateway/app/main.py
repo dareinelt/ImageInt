@@ -247,6 +247,7 @@ _STATUS_BY_CODE = {
     "enhancer_timeout": 504,
     "image_timeout": 504,
     "enhancer_error": 502,
+    "enhancer_empty": 502,
     "image_error": 502,
     "enhancer_unavailable": 502,
     "image_unavailable": 502,
