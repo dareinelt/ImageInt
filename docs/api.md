@@ -739,13 +739,20 @@ drei Felder, die den Ladevorgang nachprüfbar machen:
  "model": "Qwen/Qwen-Image-2.1-PE-T2I",
  "model_class": "Qwen3VLForConditionalGeneration",
  "parameters": 9000000000, "weight_bytes": 18000000000,
+ "rss_bytes": 18927452160, "cgroup_bytes": 19293798400,
  "dtype": "bfloat16", "device": "cpu", "load_seconds": 214.7}
 ```
 
 `parameters` und `weight_bytes` sind die einzige Prüfung von außen, ob die
 Gewichte wirklich im Speicher liegen. Ein Text-only-Halbschnitt des
 Checkpoints, ein fehlgeschlagener Ladevorgang oder ein Stub melden eine andere
-Zahl — und die RAM-Auslastung des Hosts wächst entsprechend. Der Start loggt
-dieselbe Zeile: `[enhancer] Qwen3VLForConditionalGeneration geladen: 9.00B
-Parameter, 16.8 GB Gewichte (bfloat16 auf cpu)`. Ein Checkpoint dieser Größe
-kann auf einem Host mit 3,4 GB belegtem RAM nicht geladen sein.
+Zahl. Der Start loggt dieselbe Zeile: `[enhancer] Qwen3VLForConditionalGeneration
+geladen: 9.00B Parameter, 16.8 GB Gewichte (bfloat16 auf cpu)`.
+
+`rss_bytes` und `cgroup_bytes` beantworten die Frage, die `free(1)` auf dem Host
+nicht beantworten kann: die Gewichte liegen als memory-mapped Dateiseiten vor
+und zählen dort zu `buff/cache`, nicht zu `used` — ein vollständig geladener
+17-GB-Checkpoint lässt die Spalte `used` also nahezu unverändert. Verglichen
+werden muss `rss_bytes` (bzw. `docker stats`) mit `weight_bytes`. Der Start
+loggt auch das: `[enhancer] Prozessspeicher: 17.6 GB RSS (erwartet 16.8 GB
+Gewichte)`.

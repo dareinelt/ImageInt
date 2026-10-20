@@ -765,6 +765,59 @@ def test_a_model_without_parameters_is_warned_about(monkeypatch, caplog):
     assert "keine Parameter" in caplog.text
 
 
+def test_process_memory_reads_rss_and_the_cgroup(tmp_path, monkeypatch):
+    status = tmp_path / "status"
+    status.write_text(
+        "Name:\tpython\nVmPeak:\t 9000000 kB\nVmRSS:\t 4194304 kB\n",
+        encoding="ascii",
+    )
+    cgroup = tmp_path / "memory.current"
+    cgroup.write_text("8589934592\n", encoding="ascii")
+    monkeypatch.setattr(engine_module, "PROC_STATUS", str(status))
+    monkeypatch.setattr(engine_module, "CGROUP_MEMORY", str(cgroup))
+
+    memory = engine_module.process_memory()
+    assert memory["rss_bytes"] == 4 * 1024**3
+    assert memory["cgroup_bytes"] == 8 * 1024**3
+
+
+def test_process_memory_is_empty_where_the_files_are_missing(tmp_path, monkeypatch):
+    """A native Windows or macOS run has no ``/proc``; the report is empty
+    rather than a crash."""
+
+    monkeypatch.setattr(engine_module, "PROC_STATUS", str(tmp_path / "missing"))
+    monkeypatch.setattr(engine_module, "CGROUP_MEMORY", str(tmp_path / "missing"))
+    assert engine_module.process_memory() == {}
+
+
+def test_the_status_carries_the_process_memory(monkeypatch):
+    """The host's own figure is not usable -- mmapped weights count as
+    buff/cache -- so the process reports what it holds itself."""
+
+    fake = FakeTransformers(model=FakeModel(parameters=((9_000_000_000, 2),)))
+    engine = ready_engine(fake, monkeypatch)
+
+    status = engine.status()
+    assert isinstance(status["rss_bytes"], int)
+    assert isinstance(status["cgroup_bytes"], int)
+
+
+def test_the_loaded_memory_is_logged_against_the_weight_size(
+    tmp_path, monkeypatch, caplog
+):
+    status = tmp_path / "status"
+    status.write_text("VmRSS:\t 18874368 kB\n", encoding="ascii")
+    monkeypatch.setattr(engine_module, "PROC_STATUS", str(status))
+    monkeypatch.setattr(engine_module, "CGROUP_MEMORY", str(tmp_path / "missing"))
+
+    fake = FakeTransformers(model=FakeModel(parameters=((9_000_000_000, 2),)))
+    with caplog.at_level("INFO"):
+        ready_engine(fake, monkeypatch)
+
+    assert "18.0 GB RSS" in caplog.text
+    assert "buff/cache" in caplog.text
+
+
 def test_an_input_the_loaded_class_does_not_accept_is_dropped(monkeypatch, caplog):
     """A multimodal processor returns ``mm_token_type_ids``; a text-only class
     refuses it and ``generate()`` fails within milliseconds. The field is

@@ -48,8 +48,40 @@ MODEL_CLASSES = (
 )
 
 
+#: Where the process reports its own resident memory, and what the cgroup it
+#: runs in accounts for. Both are read at load time, because the host's own
+#: figure is not a usable answer: the weights are memory-mapped files, and
+#: ``free(1)`` counts those as ``buff/cache`` instead of ``used``.
+PROC_STATUS = "/proc/self/status"
+CGROUP_MEMORY = "/sys/fs/cgroup/memory.current"
+
+
 class EngineError(RuntimeError):
     """Raised when the engine cannot load or cannot generate."""
+
+
+def process_memory() -> dict[str, int]:
+    """Resident bytes of this process and what its cgroup accounts for.
+
+    Returns whatever it could read, so a platform without ``/proc`` (a native
+    Windows or macOS run) reports nothing instead of failing.
+    """
+
+    memory: dict[str, int] = {}
+    try:
+        with open(PROC_STATUS, encoding="ascii", errors="ignore") as handle:
+            for line in handle:
+                if line.startswith("VmRSS:"):
+                    memory["rss_bytes"] = int(line.split()[1]) * 1024
+                    break
+    except (OSError, ValueError):
+        pass
+    try:
+        with open(CGROUP_MEMORY, encoding="ascii", errors="ignore") as handle:
+            memory["cgroup_bytes"] = int(handle.read().strip())
+    except (OSError, ValueError):
+        pass
+    return memory
 
 
 @dataclass(frozen=True)
@@ -453,6 +485,7 @@ class BaseEngine:
     # -- reporting --------------------------------------------------------- #
 
     def status(self) -> dict:
+        memory = process_memory()
         status = {
             "engine": self.name,
             "model": self.settings.model,
@@ -468,6 +501,11 @@ class BaseEngine:
             "model_class": self._model_class,
             "parameters": self._parameters,
             "weight_bytes": self._weight_bytes,
+            #: What the process and its cgroup actually hold. ``free(1)`` on the
+            #: host reports memory-mapped weight files as ``buff/cache``, so
+            #: these are the numbers to compare against ``weight_bytes``.
+            "rss_bytes": memory.get("rss_bytes", 0),
+            "cgroup_bytes": memory.get("cgroup_bytes", 0),
         }
         progress = self._progress.snapshot() if self._progress is not None else {}
         if progress:
@@ -619,6 +657,39 @@ class TransformersEngine(BaseEngine):
             weight_bytes / 1024**3,
             self.settings.dtype,
             self.settings.device,
+        )
+        self._log_memory(weight_bytes)
+
+    def _log_memory(self, weight_bytes: int) -> None:
+        """Log what the process holds, and what the host's figure misses.
+
+        The weights are memory-mapped, so on the host they land in ``buff/cache``
+        and a "used" reading barely moves even when the checkpoint is fully
+        resident. Reporting RSS and the cgroup total next to the expected weight
+        size turns that into one comparable number.
+        """
+
+        memory = process_memory()
+        rss = memory.get("rss_bytes", 0)
+        cgroup = memory.get("cgroup_bytes", 0)
+        if not rss and not cgroup:
+            log.info(
+                "[enhancer] Prozessspeicher nicht auslesbar; erwartet werden "
+                "%.1f GB Gewichte.",
+                weight_bytes / 1024**3,
+            )
+            return
+        parts = []
+        if rss:
+            parts.append(f"{rss / 1024**3:.1f} GB RSS")
+        if cgroup:
+            parts.append(f"{cgroup / 1024**3:.1f} GB im cgroup")
+        log.info(
+            "[enhancer] Prozessspeicher: %s (erwartet %.1f GB Gewichte). "
+            "Memory-mapped Gewichte zaehlen auf dem Host zu buff/cache, nicht zu "
+            "used.",
+            ", ".join(parts),
+            weight_bytes / 1024**3,
         )
 
     def _load_processor(self, transformers, common: dict):
