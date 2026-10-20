@@ -309,3 +309,30 @@ def test_error_text_reads_the_openai_envelope():
     body = json.dumps({"error": {"message": "Modell nicht geladen"}}).encode()
     assert vllm._error_text(body) == "Modell nicht geladen"
     assert vllm._error_text(b"kein json") == ""
+
+
+def test_error_text_reads_a_fastapi_validation_error():
+    """A 422 answers with ``detail``, not with the OpenAI error envelope; the
+    offending field is the only useful part of that answer."""
+
+    body = json.dumps(
+        {
+            "detail": [
+                {
+                    "loc": ["body", "prompt"],
+                    "msg": "String should have at least 1 character",
+                    "type": "string_too_short",
+                }
+            ]
+        }
+    ).encode()
+
+    message = vllm._error_text(body)
+
+    assert "body.prompt" in message
+    assert "at least 1 character" in message
+
+
+def test_error_text_reads_a_string_detail():
+    body = json.dumps({"detail": "Nicht gefunden"}).encode()
+    assert vllm._error_text(body) == "Nicht gefunden"

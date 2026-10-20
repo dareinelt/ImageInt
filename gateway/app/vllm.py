@@ -45,16 +45,45 @@ def _headers(token: str, *, json_body: bool = False) -> dict[str, str]:
 
 
 def _upstream_message(decoded: Any) -> str:
-    """Pull the human-readable text out of an OpenAI-style error body."""
+    """Pull the human-readable text out of an upstream error body.
+
+    OpenAI-style errors carry ``error.message``; FastAPI answers validation
+    failures (HTTP 422) with ``detail``, which is either a string or a list of
+    ``{"loc", "msg"}`` entries. Without the latter a rejected request only ever
+    surfaced as the bare status code.
+    """
 
     if not isinstance(decoded, dict):
         return ""
     error = decoded.get("error")
     if isinstance(error, dict):
-        return str(error.get("message") or "")
-    if error:
+        message = str(error.get("message") or "")
+        if message:
+            return message
+    elif error:
         return str(error)
-    return str(decoded.get("message") or "")
+    message = str(decoded.get("message") or "")
+    if message:
+        return message
+    return _detail_text(decoded.get("detail"))
+
+
+def _detail_text(detail: Any) -> str:
+    """Flatten a FastAPI ``detail`` value into one line."""
+
+    if isinstance(detail, str):
+        return detail.strip()
+    if not isinstance(detail, list):
+        return ""
+    parts: list[str] = []
+    for entry in detail:
+        if isinstance(entry, Mapping):
+            location = ".".join(str(item) for item in entry.get("loc") or ())
+            text = str(entry.get("msg") or "")
+            parts.append(f"{location}: {text}" if location else text)
+        elif isinstance(entry, str):
+            parts.append(entry)
+    return "; ".join(part for part in parts if part).strip()
 
 
 #: Numeric ``progress`` fields the model servers may report, with the type they
@@ -282,6 +311,8 @@ async def chat_completion(
     text: list[str] = []
     reasoning: list[str] = []
     usage: dict[str, Any] = {}
+    finish_reason = ""
+    error_message = ""
     model = str(body.get("model") or settings.model)
 
     started_at = time.monotonic()
@@ -320,9 +351,22 @@ async def chat_completion(
                     if decoded.get("model"):
                         model = str(decoded["model"])
                     for choice in decoded.get("choices") or []:
+                        if not isinstance(choice, Mapping):
+                            continue
+                        reason = choice.get("finish_reason")
+                        if isinstance(reason, str) and reason:
+                            finish_reason = reason
                         delta = choice.get("delta") or choice.get("message") or {}
                         if not isinstance(delta, dict):
                             continue
+                        # A failed generation carries its reason in the last
+                        # delta; the HTTP status is 200 long before the engine
+                        # can fail, so this is the only place it can be seen.
+                        error = delta.get("error")
+                        if isinstance(error, Mapping):
+                            message = error.get("message")
+                            if isinstance(message, str) and message:
+                                error_message = message
                         # `--reasoning-parser qwen3` splits the thinking block
                         # into its own field; without it the text arrives inline
                         # and enhancer.split_thinking recovers it.
@@ -350,6 +394,8 @@ async def chat_completion(
         "ok": True,
         "text": "".join(text),
         "reasoning": "".join(reasoning),
+        "finish_reason": finish_reason,
+        "error": error_message,
         "model": model,
         "latency_ms": latency_ms,
         "usage": {

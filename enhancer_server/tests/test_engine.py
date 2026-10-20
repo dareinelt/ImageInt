@@ -102,7 +102,9 @@ class CountingEngine(BaseEngine):
         time.sleep(0.01)
 
     def _generate(self, request: ChatRequest, usage: Optional[dict] = None):
-        return iter(())
+        # An answer has to carry content, otherwise BaseEngine.stream() reports
+        # it instead of returning nothing.
+        yield "</think>\nAntwort"
 
 
 # --------------------------------------------------------------------------- #
@@ -378,8 +380,10 @@ class FakeTensor:
 
 
 class FakeTokenizer:
-    def __init__(self, template=None) -> None:
+    def __init__(self, template=None, extra_inputs=()) -> None:
         self.template = template
+        # Fields a multimodal processor adds, e.g. mm_token_type_ids.
+        self.extra_inputs = tuple(extra_inputs)
         self.template_calls: list = []
         self.tokenize_calls: list = []
 
@@ -399,7 +403,10 @@ class FakeTokenizer:
             # A real tokenizer returns a flat list of ids for one sequence and a
             # list of lists for a batch, which is what count_tokens() relies on.
             return {"input_ids": rows[0] if single else rows}
-        return {"input_ids": FakeTensor(rows), "attention_mask": FakeTensor(rows)}
+        encoded = {"input_ids": FakeTensor(rows), "attention_mask": FakeTensor(rows)}
+        for name in self.extra_inputs:
+            encoded[name] = FakeTensor(rows)
+        return encoded
 
 
 class FakeProcessor:
@@ -410,14 +417,34 @@ class FakeProcessor:
         return self.tokenizer(**kwargs)
 
 
+class FakeParameter:
+    """Just enough of a parameter to be counted."""
+
+    def __init__(self, count, element_size=2) -> None:
+        self.count = count
+        self._element_size = element_size
+
+    def numel(self):
+        return self.count
+
+    def element_size(self):
+        return self._element_size
+
+
 class FakeModel:
-    def __init__(self, max_position_embeddings=32768) -> None:
+    """A model as large as the checkpoint, so the size report has something to
+    count. ``parameters=[]`` fakes a model that never received any weights."""
+
+    def __init__(
+        self, max_position_embeddings=32768, *, parameters=((9_000_000_000, 2),)
+    ) -> None:
         self.config = types.SimpleNamespace(
             max_position_embeddings=max_position_embeddings
         )
         self.device = None
         self.evaluated = False
         self.generate_kwargs: dict = {}
+        self._parameters = [FakeParameter(*item) for item in parameters]
 
     def to(self, device):
         self.device = device
@@ -427,8 +454,18 @@ class FakeModel:
         self.evaluated = True
         return self
 
+    def parameters(self):
+        return list(self._parameters)
+
     def generate(self, **kwargs):
         self.generate_kwargs = kwargs
+
+
+class FakeTextOnlyModel(FakeModel):
+    """A text-only checkpoint: its ``forward`` has no multimodal inputs."""
+
+    def forward(self, input_ids=None, attention_mask=None, position_ids=None):
+        return None
 
 
 class FakeTransformers:
@@ -447,20 +484,27 @@ class FakeTransformers:
         processor_error: Optional[Exception] = None,
         tokenizer_error: Optional[Exception] = None,
         model_classes=("AutoModelForCausalLM",),
+        failing_classes=(),
         template=None,
         max_position_embeddings: int = 32768,
+        model: Optional[FakeModel] = None,
+        processor_inputs=(),
     ) -> None:
         self.stream_script = list(stream_script)
+        # Optional per-attempt scripts, so a retry can answer differently.
+        self.stream_scripts: list = []
         self.processor_error = processor_error
         self.tokenizer_error = tokenizer_error
-        self.model = FakeModel(max_position_embeddings)
-        self.processor = FakeProcessor(FakeTokenizer(template))
+        self.failing_classes = set(failing_classes)
+        self.model = model or FakeModel(max_position_embeddings)
+        self.processor = FakeProcessor(FakeTokenizer(template, processor_inputs))
         self.tokenizer = self.processor.tokenizer
         self.processor_calls: list = []
         self.tokenizer_calls: list = []
         self.model_calls: list = []
         self.quanto_calls: list = []
         self.streamer_kwargs: dict = {}
+        self.streamers = 0
         self.streamer_ended = False
         fake = self
 
@@ -491,9 +535,15 @@ class FakeTransformers:
         class FakeTextIteratorStreamer:
             def __init__(self, tokenizer, **kwargs) -> None:
                 fake.streamer_kwargs = kwargs
+                fake.streamers += 1
 
             def __iter__(self):
-                yield from fake.stream_script
+                script = (
+                    fake.stream_scripts.pop(0)
+                    if fake.stream_scripts
+                    else fake.stream_script
+                )
+                yield from script
 
             def end(self) -> None:
                 fake.streamer_ended = True
@@ -538,6 +588,8 @@ def _model_class(name, fake):
         @staticmethod
         def from_pretrained(model, **kwargs):
             fake.model_calls.append((model, kwargs))
+            if name in fake.failing_classes:
+                raise ValueError(f"{name} kann diesen Checkpoint nicht laden")
             return fake.model
 
     _Model.__name__ = name
@@ -640,10 +692,109 @@ def test_a_model_without_a_chat_template_fails_loudly(monkeypatch):
     assert "AutoProcessor" in engine.status()["error"]
 
 
-def test_the_first_available_model_class_is_used(monkeypatch):
-    fake = FakeTransformers(model_classes=("Qwen3VLForConditionalGeneration",))
-    ready_engine(fake, monkeypatch)
+def test_the_multimodal_model_class_is_tried_first(monkeypatch):
+    """The checkpoint is a vision-language model. ``AutoModelForCausalLM``
+    loads only its text half, which answers with an immediate error instead of
+    a prompt, so the multimodal class has to come first."""
+
+    fake = FakeTransformers(
+        model_classes=(
+            "Qwen3VLForConditionalGeneration",
+            "AutoModelForImageTextToText",
+            "AutoModelForCausalLM",
+        )
+    )
+    engine = ready_engine(fake, monkeypatch)
+
+    assert engine.status()["model_class"] == "Qwen3VLForConditionalGeneration"
+    assert len(fake.model_calls) == 1
     assert fake.model_calls[0][0] == "Qwen/Qwen-Image-2.1-PE-T2I"
+
+
+def test_a_model_class_that_cannot_load_the_checkpoint_falls_through(monkeypatch):
+    fake = FakeTransformers(
+        model_classes=("Qwen3VLForConditionalGeneration", "AutoModelForCausalLM"),
+        failing_classes=("Qwen3VLForConditionalGeneration",),
+    )
+    engine = ready_engine(fake, monkeypatch)
+
+    assert engine.status()["state"] == "ready"
+    assert engine.status()["model_class"] == "AutoModelForCausalLM"
+    assert len(fake.model_calls) == 2
+
+
+def test_every_failing_model_class_is_named_in_the_error(monkeypatch):
+    fake = FakeTransformers(
+        model_classes=("Qwen3VLForConditionalGeneration", "AutoModelForCausalLM"),
+        failing_classes=("Qwen3VLForConditionalGeneration", "AutoModelForCausalLM"),
+    )
+    fake_torch(monkeypatch)
+    fake.install(monkeypatch)
+    engine = TransformersEngine(stub_settings())
+    engine.ensure_loaded()
+
+    assert engine.status()["state"] == "error"
+    assert "Qwen3VLForConditionalGeneration" in engine.status()["error"]
+    assert "AutoModelForCausalLM" in engine.status()["error"]
+
+
+def test_the_loaded_size_is_reported(monkeypatch):
+    """The parameter count is the only outside proof that the weights are
+    resident: a text-only half or a model without weights reports a different
+    number, and the host RAM has to grow by the weight size."""
+
+    fake = FakeTransformers(model=FakeModel(parameters=((9_000_000_000, 2),)))
+    engine = ready_engine(fake, monkeypatch)
+
+    status = engine.status()
+    assert status["parameters"] == 9_000_000_000
+    assert status["weight_bytes"] == 18_000_000_000
+
+
+def test_the_loaded_size_is_logged(monkeypatch, caplog):
+    fake = FakeTransformers(model=FakeModel(parameters=((9_000_000_000, 2),)))
+    with caplog.at_level("INFO"):
+        ready_engine(fake, monkeypatch)
+    assert "9.00B Parameter" in caplog.text
+
+
+def test_a_model_without_parameters_is_warned_about(monkeypatch, caplog):
+    fake = FakeTransformers(model=FakeModel(parameters=[]))
+    with caplog.at_level("WARNING"):
+        ready_engine(fake, monkeypatch)
+    assert "keine Parameter" in caplog.text
+
+
+def test_an_input_the_loaded_class_does_not_accept_is_dropped(monkeypatch, caplog):
+    """A multimodal processor returns ``mm_token_type_ids``; a text-only class
+    refuses it and ``generate()`` fails within milliseconds. The field is
+    dropped and reported instead of failing the whole request."""
+
+    fake = FakeTransformers(
+        model=FakeTextOnlyModel(),
+        processor_inputs=("mm_token_type_ids",),
+        stream_script=["<think>\n", "</think>", "Antwort"],
+    )
+    engine = ready_engine(fake, monkeypatch)
+
+    with caplog.at_level("WARNING"):
+        list(engine.stream(request()))
+
+    assert "mm_token_type_ids" not in fake.model.generate_kwargs
+    assert "mm_token_type_ids" in caplog.text
+
+
+def test_an_input_the_loaded_class_accepts_is_kept(monkeypatch):
+    fake = FakeTransformers(
+        processor_inputs=("mm_token_type_ids",),
+        stream_script=["<think>\n", "</think>", "Antwort"],
+    )
+    engine = ready_engine(fake, monkeypatch)
+
+    # FakeModel has no forward() signature to inspect, so nothing is dropped.
+    list(engine.stream(request()))
+
+    assert "mm_token_type_ids" in fake.model.generate_kwargs
 
 
 def test_a_transformers_without_any_known_model_class_is_rejected(monkeypatch):
@@ -813,6 +964,54 @@ def test_a_generation_failure_reaches_the_caller(monkeypatch):
     fake.model.generate = explode
     with pytest.raises(EngineError, match="kein Speicher"):
         list(engine.stream(request()))
+
+
+def test_a_thinking_only_answer_is_repeated_without_thinking(monkeypatch, caplog):
+    """A model that never closes its thinking block would answer with nothing,
+    and an empty prompt is rejected by the image server. The repeat is the fix
+    that stays inside the enhancer."""
+
+    def template(messages, kwargs):
+        prefill = "<think>\n" if kwargs.get("enable_thinking") else ""
+        body = "".join(message_text(message) for message in messages)
+        return body + "<|im_start|>assistant\n" + prefill
+
+    fake = FakeTransformers(template=template)
+    fake.stream_scripts = [["<think>\n", "Ich überlege noch"], ["Antwort"]]
+    engine = ready_engine(fake, monkeypatch)
+
+    with caplog.at_level("WARNING"):
+        pairs = list(engine.stream(request()))
+
+    assert "".join(part for _, part in pairs) == "Antwort"
+    assert fake.tokenizer.template_calls[-1][1]["enable_thinking"] is False
+    assert "zweiter Versuch" in caplog.text
+
+
+def test_an_answer_without_any_content_fails_instead_of_returning_nothing(monkeypatch):
+    fake = FakeTransformers()
+    fake.stream_scripts = [
+        ["<think>\n", "Ich überlege noch"],
+        ["<think>\n", "immer noch"],
+    ]
+    engine = ready_engine(fake, monkeypatch)
+
+    with pytest.raises(EngineError, match="IMAGEINT_PE_MAX_NEW_TOKENS"):
+        list(engine.stream(request()))
+
+
+def test_with_thinking_off_an_empty_answer_fails_at_once(monkeypatch):
+    fake = FakeTransformers(
+        template=lambda messages, kwargs: "<|im_start|>assistant\n",
+        stream_script=[],
+    )
+    engine = ready_engine(fake, monkeypatch)
+
+    with pytest.raises(EngineError):
+        list(engine.stream(request(enable_thinking=False)))
+
+    # Nothing to switch off, so there is no second attempt.
+    assert fake.streamers == 1
 
 
 def test_aborting_the_stream_stops_the_decoder(monkeypatch):

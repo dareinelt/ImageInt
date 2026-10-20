@@ -27,6 +27,11 @@ Two deliberate additions on top of the reference:
   enhancer produced no usable JSON, in which case the raw answer is used as the
   prompt so a generation is never lost -- but the caller can see that it
   happened. On a CPU host a silent fallback is expensive to notice.
+* an *empty* answer is an error, not a fallback. The enhancer server repeats a
+  generation that produced only a thinking block once with thinking disabled and
+  reports a failed generation in the stream, so an answer that arrives without
+  content means the enhancer itself is broken. Forwarding the input prompt
+  instead would hide that behind a generation that merely looks unenhanced.
 """
 
 from __future__ import annotations
@@ -37,7 +42,7 @@ from typing import Any, Optional
 
 from . import ratios, vllm
 from .config import EnhancerSettings
-from .errors import bad_request, not_configured
+from .errors import bad_request, not_configured, upstream_unavailable
 
 log = logging.getLogger("imageint.enhancer")
 
@@ -221,16 +226,39 @@ async def enhance(
         thinking = result["reasoning"].strip()
 
     parsed = parse_answer(answer)
+    if result.get("finish_reason") == "error" or result.get("error"):
+        # The server ends a failed generation with finish_reason=error and puts
+        # the reason in the last delta, because the status line is 200 long
+        # before the engine can fail. Passing the input prompt on here would
+        # hide a broken enhancer behind a plausible-looking generation.
+        raise upstream_unavailable(
+            "enhancer_error",
+            result.get("error")
+            or "Der Prompt-Enhancer hat die Generierung abgebrochen "
+            "(finish_reason=error).",
+        )
+    if not parsed["positive_prompt"]:
+        # The server repeats a generation that produced only a thinking block
+        # once, without thinking, before it answers. An answer that is still
+        # empty is therefore a defect of the enhancer and not a property of this
+        # prompt, and the image server would reject it with HTTP 422 anyway.
+        raise upstream_unavailable(
+            "enhancer_empty",
+            "Der Prompt-Enhancer hat eine leere Antwort geliefert; ohne Prompt "
+            "kann kein Bild erzeugt werden.",
+        )
     if not parsed["parse_ok"]:
         log.warning(
             "Der Prompt-Enhancer hat kein auswertbares JSON geliefert; die Antwort "
             "wird unverändert als Prompt verwendet."
         )
 
+    enhanced_prompt = parsed["positive_prompt"]
+
     width, height = ratios.size_for(parsed["wh_ratio"], max_pixels)
 
     return {
-        "prompt": parsed["positive_prompt"],
+        "prompt": enhanced_prompt,
         "negative_prompt": parsed["negative_prompt"],
         "wh_ratio": ratios.normalize(parsed["wh_ratio"]),
         "width": width,
